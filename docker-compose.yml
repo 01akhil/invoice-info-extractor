@@ -1,7 +1,7 @@
 # Redis for the parallel (queue) pipeline. From project root:
 #   docker compose up -d
 # Then:
-#   python main.py --mode pipeline
+#   python main.py
 services:
   redis:
     image: redis:7-alpine
