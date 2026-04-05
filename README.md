@@ -138,6 +138,14 @@ The system does **not** use a single global “model confidence” for vendor, d
 - On eligible rows, **numeric tokens** are parsed as currency amounts (with simple normalization for `RM`, commas, common OCR confusions). When several numbers appear, the implementation tends toward the **largest plausible amount** on that row (totals are often the dominant figure next to the label).
 - Among labeled rows, candidates are ordered by **label strength** and **vertical position** (lower on the receipt often corresponds to the final total). The winning candidate’s label score is **mapped** to a confidence in `[0, 1]`.
 
+### Example: Shell fuel receipt
+
+The following real receipt (**LEONG HENG SHELL SERVICE STATION**) illustrates typical layout: vendor in the header, several monetary amounts (e.g. Total, Cash, Total Gross), and a **date** in a footer row next to **time** (`20/06/18` with `00:05`). The second image shows the same scan with **vendor** (red), **total** (green, here aligned with the gross total line), and **date** (blue) highlighted—mirroring how heuristics target regions before confidence scores feed the routing step below.
+
+![Original thermal receipt (Shell station)](docs/images/shell_receipt_original.png)
+
+![Same receipt with vendor, total, and date regions marked](docs/images/shell_receipt_annotated.png)
+
 ### Routing thresholds (rules → LLM)
 
 After these three confidences are known, a **deterministic policy** sends the job to the LLM if vendor is weak, total is extremely weak, or date is weak (see logs in post-OCR: “vendor<0.5 OR total<0.05 OR date<0.1”). This encodes the idea that **missing totals are more dangerous** than a slightly fuzzy vendor name, so the bar for “total” is higher.

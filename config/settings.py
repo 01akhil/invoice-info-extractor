@@ -67,15 +67,17 @@ CB_FAIL_THRESHOLD = int(os.environ.get("CB_FAIL_THRESHOLD", "5"))
 CB_OPEN_SEC = int(os.environ.get("CB_OPEN_SEC", "60"))
 
 # --- Google Form (submit) — only ``valid_invoices`` from exports are posted, never human_review ---
+
 SUBMIT_FORM_URL = os.environ.get(
     "SUBMIT_FORM_URL",
-    "https://docs.google.com/forms/d/e/1FAIpQLSctaeo7fqsj6qH5XVu540XFUPRQZc1EkFc3BouomvO6Dnkh8Q/formResponse",
+    "https://docs.google.com/forms/d/e/1FAIpQLScpamHrcS3vWr4-uWVqxw9Vr9vU74cJmhdFgor0yLPoCgkbWA/formResponse",
 )
-SUBMIT_ENTRY_VENDOR = os.environ.get("SUBMIT_ENTRY_VENDOR", "entry.977974756")
-SUBMIT_ENTRY_DATE = os.environ.get("SUBMIT_ENTRY_DATE", "entry.315676621")
-SUBMIT_ENTRY_TOTAL = os.environ.get("SUBMIT_ENTRY_TOTAL", "entry.1280661284")
+
+SUBMIT_ENTRY_VENDOR = os.environ.get("SUBMIT_ENTRY_VENDOR", "entry.185959394")
+SUBMIT_ENTRY_DATE = os.environ.get("SUBMIT_ENTRY_DATE", "entry.1839803201")
+SUBMIT_ENTRY_TOTAL = os.environ.get("SUBMIT_ENTRY_TOTAL", "entry.552729475")
 SUBMIT_MAX_RETRIES = int(os.environ.get("SUBMIT_MAX_RETRIES", "3"))
-SUBMIT_DELAY = float(os.environ.get("SUBMIT_DELAY", "0.5"))
+SUBMIT_DELAY = float(os.environ.get("SUBMIT_DELAY", "0.2"))
 SUBMIT_TIMEOUT = float(os.environ.get("SUBMIT_TIMEOUT", "15"))
 # After a one-shot pipeline run, POST valid_invoices to the form (set 0 or use --no-submit-form to skip).
 SUBMIT_AFTER_PIPELINE = os.environ.get("SUBMIT_AFTER_PIPELINE", "1").lower() not in (
