@@ -4,7 +4,7 @@ A batch-oriented system that ingests receipt images from a folder, runs **Tesser
 
 **Yes — the LLM stage often processes several invoices in a single Gemini request.** Workers dequeue up to `LLM_BATCH_MAX` jobs (default 3), wait briefly to fill the batch, build one prompt containing multiple receipts’ OCR text, issue **one** API call, then split the structured response per `job_id`. If batch parsing fails or a job is missing from the model output, the system **falls back to one API call per invoice** so nothing is silently dropped.
 
-The primary entrypoint is [`main.py`](main.py). **Google Forms** submission (optional) posts only **`valid_invoices`** (terminal `SUCCESS` rows), failed jobs requires human review thus stored in human_review_queue.
+The primary entrypoint is [`main.py`](main.py). **Google Forms** submission (optional) posts **`valid_invoices`** (terminal `SUCCESS` rows). Jobs that cannot be automated reliably are routed to **`NEEDS_REVIEW`** and recorded in `results/human_review_queue.json`.
 
 ---
 
@@ -18,7 +18,7 @@ The primary entrypoint is [`main.py`](main.py). **Google Forms** submission (opt
 | Cost-aware AI | Rules first; Gemini when rule confidences are low or validation requests a stricter LLM pass |
 | Observability | Structured `[pipeline]` logs, Redis-backed counters (`metrics` in export JSON) |
 | Human handoff | Jobs that exhaust retries become `NEEDS_REVIEW` and appear in `results/human_review_queue.json` |
-| Form integration | After each one-shot run,  HTTP POST of successes to a Google Form |
+| Form integration | After each one-shot run, HTTP POST of successes to a Google Form (optional) |
 
 ---
 
@@ -79,13 +79,78 @@ Start Redis first (`docker compose up -d`), then run `python main.py` from the p
 
 ---
 
+## Idempotency
+
+**Goal:** Re-running ingestion or restarting workers must not create duplicate work for the same logical job.
+
+- **Stable identity:** Each invoice is assigned a **`job_id`** (UUID) at first ingest. That identifier is the primary key in SQLite (`invoice_jobs`).
+- **Ingest:** If [`workers/tasks/ingestion.py`](workers/tasks/ingestion.py) sees a row that already exists for a given `job_id`, it **does not** enqueue another OCR message. The pipeline remains safe to call twice with the same id.
+- **State is authoritative:** Redis queues are **ephemeral**; the **database row** is the source of truth for whether a job exists and what stage it reached. Clearing Redis does not duplicate rows; it may require re-enqueueing work in edge cases, but duplicate **rows** are avoided by the ingest check.
+- **Exports:** Each run overwrites the latest `pipeline_export.json` / `evaluation_summary.json` for observability of the **current** batch (unless you opt into accumulating human-review history via env).
+
+The architecture diagram below includes an **idempotent ingest** gate to show this explicitly.
+
+---
+
+## Key components and data flow
+
+| Layer | Role |
+|-------|------|
+| **Orchestrator** ([`workers/tasks/orchestrator.py`](workers/tasks/orchestrator.py), [`main.py`](main.py)) | Starts workers, ingests folder, waits for completion, exports JSON/CSV, evaluation summary, optional form submit. |
+| **Redis** | List queues (`Q_OCR`, `Q_POST_OCR`, `Q_LLM`, `Q_VALIDATE`) for fan-out work; **sorted set** `RETRY_ZSET` for time-delayed retries. |
+| **SQLite** | Durable `InvoiceJob` records: OCR snapshots, extraction payloads, status, retries, errors. |
+| **OCR** ([`workers/core/ocr_worker.py`](workers/core/ocr_worker.py), [`ocr/ocr.py`](ocr/ocr.py)) | Multiprocess Tesseract; writes `ocr_snapshot`. |
+| **Rules** ([`workers/core/post_ocr_worker.py`](workers/core/post_ocr_worker.py), [`extractors/`](extractors/), [`pipeline/stages.py`](pipeline/stages.py)) | Heuristic vendor/date/total + confidences; route to validate or LLM. |
+| **LLM** ([`workers/core/llm_worker.py`](workers/core/llm_worker.py), [`pipeline/llm_batch/`](pipeline/llm_batch/), [`llm/`](llm/)) | Batched or single Gemini calls; structured JSON mapped back per `job_id`. |
+| **Validation** ([`workers/core/validate_worker.py`](workers/core/validate_worker.py), [`pipeline/validation/validation_layer.py`](pipeline/validation/validation_layer.py)) | Schema and business rules; success, retry with new strategy, or human review. |
+| **Retry scheduler** ([`workers/retry/retry_ops.py`](workers/retry/retry_ops.py)) | Moves due retries from `RETRY_ZSET` back onto target queues. |
+| **Submit** ([`submit/service.py`](submit/service.py)) | POST only `valid_invoices` to Google Forms. |
+
+**Data flow (happy path):** image file → ingest (DB row + `Q_OCR`) → OCR (`ocr_snapshot`, `Q_POST_OCR`) → rules (confidences) → either **`Q_VALIDATE`** (fast path) or **`Q_LLM`** → **`Q_VALIDATE`** → `SUCCESS` → export → optional form.
+
+**Unhappy path:** any stage can increment retries, schedule delayed reprocessing to LLM (or OCR in some failures), or end in **`NEEDS_REVIEW`** with a JSON audit trail.
+
+---
+
+## Heuristic confidence and candidate selection (rules stage)
+
+The system does **not** use a single global “model confidence” for vendor, date, and total. Instead, each field uses **hand-crafted heuristics** that combine OCR signals, layout, and domain rules. Values are turned into **per-field confidences in [0, 1]** used for routing (whether to skip the LLM).
+
+### Vendor
+
+- OCR is restricted to the **top band** of the receipt (header area), where merchant names usually appear.
+- Lines are grouped into visual lines; lines are filtered using **negative phrases** (invoice boilerplate, addresses, “thank you”, tax wording, etc.) and **positive business-like tokens** (e.g. trading, SDN BHD, hardware).
+- Lines that look **handwritten or stamped** (low average Tesseract confidence per token, or erratic character heights) are dropped as unreliable.
+- **Candidate vendor strings** are formed by merging up to a few consecutive lines; each candidate receives a **score** from uppercase ratio, positive-word hits, length sweet spot, word-count penalty (to avoid addresses), and position near the top.
+- The best candidate’s score is **normalized** to a confidence. If nothing clears a minimum score, vendor is treated as missing / low confidence.
+
+### Date (invoice date, not clock time)
+
+- Multiple **date regex patterns** scan OCR lines (numeric and textual month forms).
+- Matches that look like **clock times** (e.g. containing `:`) are skipped so “12:30” is not mistaken for a calendar date.
+- Each candidate receives a **composite score**: boosts when the surrounding line mentions “date” / “invoice”, a **vertical position** preference (dates often appear higher on the slip), plus the underlying **Tesseract confidence** for that text region.
+- The **highest-scoring** candidate wins; its OCR confidence contributes to the date field’s confidence for routing.
+
+### Total (amount payable)
+
+- Words are read from a **preprocessed** binarized image; tokens are grouped into rows.
+- Rows whose text matches **prioritized labels** (“Grand total”, “Total payable”, “Net payable”, …) receive a **label score**. Rows matching **skip patterns** (discount, subtotal, change, GST-only lines, etc.) are ignored.
+- On eligible rows, **numeric tokens** are parsed as currency amounts (with simple normalization for `RM`, commas, common OCR confusions). When several numbers appear, the implementation tends toward the **largest plausible amount** on that row (totals are often the dominant figure next to the label).
+- Among labeled rows, candidates are ordered by **label strength** and **vertical position** (lower on the receipt often corresponds to the final total). The winning candidate’s label score is **mapped** to a confidence in `[0, 1]`.
+
+### Routing thresholds (rules → LLM)
+
+After these three confidences are known, a **deterministic policy** sends the job to the LLM if vendor is weak, total is extremely weak, or date is weak (see logs in post-OCR: “vendor<0.5 OR total<0.05 OR date<0.1”). This encodes the idea that **missing totals are more dangerous** than a slightly fuzzy vendor name, so the bar for “total” is higher.
+
+---
+
 ## End-to-end pipeline (step by step)
 
 Each image becomes one **`InvoiceJob`** (`job_id`). State is stored in SQLite; **Redis list queues** move work between stages; a **sorted set** (`RETRY_ZSET`) holds delayed retries with exponential backoff.
 
 ### 1. Ingestion
 
-[`workers/tasks/ingestion.py`](workers/tasks/ingestion.py) scans **only the top level** of `IMAGES_DIR` for `.jpg` / `.jpeg` / `.png`, creates a row (`PENDING`), and **LPUSH**es `{"job_id": ...}` to **`Q_OCR`**. Re-ingesting the same `job_id` is idempotent (existing DB row is not duplicated).
+[`workers/tasks/ingestion.py`](workers/tasks/ingestion.py) scans **only the top level** of `IMAGES_DIR` for `.jpg` / `.jpeg` / `.png`, creates a row (`PENDING`), and **LPUSH**es `{"job_id": ...}` to **`Q_OCR`**. **Idempotent:** if the `job_id` already exists in the DB, no duplicate row and no duplicate enqueue.
 
 ### 2. OCR (multiprocess)
 
@@ -98,43 +163,39 @@ Each image becomes one **`InvoiceJob`** (`job_id`). State is stored in SQLite; *
 - If **all** confidences pass thresholds (**fast path**): build **`extraction_payload`** with source **`OCR_RULE`**, set status **`VALIDATING`**, enqueue **`Q_VALIDATE`** — **no LLM call**.
 - If **any** field is too uncertain: increment **`llm_fallback_routed`**, set **`LLM_PENDING`**, **LPUSH** to **`Q_LLM`** with a **strategy** string (e.g. `default`, later `after_validation_fail`, `ocr_retry`).
 
-So many receipts never hit Gemini; only “hard” rows consume API quota.
+### 4. LLM extraction — batched multi-invoice calls
 
-### 4. LLM extraction — including **batched multi-invoice** calls
+[`workers/core/llm_worker.py`](workers/core/llm_worker.py) implements **batch collection**: block on **`Q_LLM`**, then pull more messages until **`LLM_BATCH_MAX`** jobs are collected (or the queue is empty).
 
-[`workers/core/llm_worker.py`](workers/core/llm_worker.py) implements **batch collection**: block on **`Q_LLM`** for up to **`LLM_BATCH_FIRST_WAIT_SEC`**, then pull more messages with short **`LLM_BATCH_INTER_WAIT_SEC`** timeouts until **`LLM_BATCH_MAX`** jobs are collected (or the queue is empty).
+- **Batch path:** [`pipeline/llm_batch/batch_llm.py`](pipeline/llm_batch/batch_llm.py) merges strategies with **`merge_batch_strategies`**, builds **one prompt** ([`pipeline/llm_batch/prompt_builder.py`](pipeline/llm_batch/prompt_builder.py)), calls Gemini **once**, parses JSON ([`pipeline/llm_batch/batch_parser.py`](pipeline/llm_batch/batch_parser.py)). Per `job_id`, write **`extraction_payload`**, **`VALIDATING`**, **`Q_VALIDATE`**.
 
-- **Batch path:** [`pipeline/llm_batch/batch_llm.py`](pipeline/llm_batch/batch_llm.py) merges strategies with **`merge_batch_strategies`** (the strictest wins: e.g. `ocr_retry` over `default`), builds **one prompt** listing multiple `(job_id, image path, OCR text)` tuples ([`pipeline/llm_batch/prompt_builder.py`](pipeline/llm_batch/prompt_builder.py)), calls **`gemini_llm_call`** **once**, parses JSON with [`pipeline/llm_batch/batch_parser.py`](pipeline/llm_batch/batch_parser.py). For each `job_id` in the response, write **`extraction_payload`**, set **`VALIDATING`**, enqueue **`Q_VALIDATE`**. Metrics: **`llm_invocations`** += 1, **`llm_batch_calls`** += 1.
-
-- **Fallback:** If the batch response does not parse or a **`job_id`** is missing from the parsed map, those jobs run **`_execute_single_llm`** — **one Gemini call per invoice** — and metrics increment **`llm_single_calls`**.
-
-- **Exceptions:** On batch exception, **all** jobs in the batch fall back to single-job calls.
-
-This design **reduces API round-trips** when several invoices wait for the LLM at once, while keeping a **safe degradation path** when the model returns malformed or incomplete batch JSON.
+- **Fallback:** If the batch response does not parse or a **`job_id`** is missing, those jobs run **single-invoice** Gemini calls.
 
 ### 5. Validation
 
-[`workers/core/validate_worker.py`](workers/core/validate_worker.py) runs [`pipeline/validation/validation_layer.py`](pipeline/validation/validation_layer.py) on **`extraction_payload`** (from rules or LLM).
+[`workers/core/validate_worker.py`](workers/core/validate_worker.py) runs [`pipeline/validation/validation_layer.py`](pipeline/validation/validation_layer.py).
 
-- **Pass:** Normalize vendor/date/total, set **`SUCCESS`**, persist final columns, increment **`success_total`**.
-- **Fail (retries left):** Schedule a **delayed retry** onto **`RETRY_ZSET`** with **`target_queue=Q_LLM`** and a **new strategy** from [`workers/retry/retry_strategy.py`](workers/retry/retry_strategy.py) (stricter prompt). After backoff, [`workers/retry/retry_ops.py`](workers/retry/retry_ops.py) moves the job back to **`Q_LLM`**.
-- **Fail (no retries left):** **`NEEDS_REVIEW`**, merge into **`human_review_queue.json`**.
+- **Pass:** Normalize fields, set **`SUCCESS`**, increment **`success_total`**.
+- **Fail (retries left):** Schedule **`RETRY_ZSET`** → **`Q_LLM`** with a **new strategy** ([`workers/retry/retry_strategy.py`](workers/retry/retry_strategy.py)).
+- **Fail (no retries left):** **`NEEDS_REVIEW`**, **`human_review_queue.json`**.
 
 ### 6. Retry scheduler
 
-A background thread runs **`retry_scheduler_loop`**: periodically inspects **`RETRY_ZSET`** for scores ≤ now, **LPUSH**es the stored payload back to the target queue (usually **`Q_LLM`** or OCR/validate depending on failure class). Delay grows roughly **`RETRY_BASE_SEC * 2^retry_count`** capped by **`RETRY_CAP_SEC`**, with small jitter.
+[`workers/retry/retry_ops.py`](workers/retry/retry_ops.py): due retries are moved back to target queues. Delay ≈ **`RETRY_BASE_SEC * 2^retry_count`**, capped by **`RETRY_CAP_SEC`**, with jitter.
 
 ### 7. Orchestrator shutdown and export
 
-[`workers/tasks/orchestrator.py`](workers/tasks/orchestrator.py) (invoked from [`main.py`](main.py)) waits until all ingested jobs reach a **terminal** state (`SUCCESS`, **`NEEDS_REVIEW`**, legacy DLQ, etc.) or hits **timeout**. Then [`workers/tasks/export_results.py`](workers/tasks/export_results.py) writes **`pipeline_export.json`** / **`.csv`**, and [`pipeline/evaluation/evaluation_summary.py`](pipeline/evaluation/evaluation_summary.py) writes **`evaluation_summary.json`**.
+[`workers/tasks/orchestrator.py`](workers/tasks/orchestrator.py) waits for terminal states or timeout, then [`workers/tasks/export_results.py`](workers/tasks/export_results.py) and [`pipeline/evaluation/evaluation_summary.py`](pipeline/evaluation/evaluation_summary.py).
 
-### Architecture diagram
+### Architecture diagram (with idempotent ingest)
 
 ```mermaid
 flowchart TB
   subgraph ingest [1. Ingest]
-    F[images/*.jpg png]
-    F --> ID[job_id in SQLite PENDING]
+    F[images]
+    F --> DUP{job_id already in SQLite?}
+    DUP -->|yes| SKIP[Skip enqueue — idempotent]
+    DUP -->|no| ID[job_id row PENDING]
     ID --> QO[Q_OCR]
   end
 
@@ -154,7 +215,7 @@ flowchart TB
     QL --> COL[Collect batch up to LLM_BATCH_MAX]
     COL --> GEM{One Gemini call}
     GEM -->|parsed per job_id| QV
-    GEM -->|parse fail / missing id| ONE[Single-job Gemini per invoice]
+    GEM -->|parse fail / missing id| ONE[Single-job Gemini]
     ONE --> QV
   end
 
@@ -168,59 +229,148 @@ flowchart TB
 
   subgraph sched [Retry scheduler]
     Z[RETRY_ZSET backoff] --> QL
-    Z --> QP
   end
 ```
 
 ---
 
-## Project intricacies
+## Architecture decision record (ADR)
 
-| Topic | Behavior |
-|-------|----------|
-| **Batch vs single LLM** | Prefer one request for many jobs; **single-invoice** calls on parse errors, missing `job_id`, or exceptions — see [`llm_worker.py`](workers/core/llm_worker.py) `_llm_batch_once` / `_execute_single_llm`. |
-| **Strategy merge** | In a batch, the **strictest** prompt strategy applies to the whole prompt (`merge_batch_strategies`). |
-| **Metrics** | Redis counters (`METRICS`) reset at each pipeline start unless **`EVAL_KEEP_METRICS=1`**; export JSON embeds a snapshot for that run. |
-| **Human review file** | Default: **empty** `human_review_queue.json` at run start; set **`EVAL_ACCUMULATE_HUMAN_REVIEW=1`** to merge across runs. |
-| **SQLite** | WAL mode and busy handling support concurrent workers; avoid locking the DB file exclusively in other tools during runs. |
-| **Idempotent ingest** | Same `job_id` in DB skips duplicate enqueue. |
-| **Circuit breaker (optional)** | [`workers/utils/circuit_breaker.py`](workers/utils/circuit_breaker.py) implements an in-process breaker; `CB_*` settings exist in [`config/settings.py`](config/settings.py) for wiring if you extend the LLM client. |
-
-For package-level layout, see [`workers/README.md`](workers/README.md).
+| Decision | Rationale | Tradeoff |
+|----------|-----------|----------|
+| **Redis + workers** | Decouple CPU-heavy OCR from I/O and LLM latency; scale OCR horizontally | Requires Redis and more moving parts than a monolithic script |
+| **SQLite per job** | Durable, idempotent jobs; simple ops | Not ideal for very high write QPS; fine for batch receipts |
+| **Tesseract for OCR** | Mature, local, no extra GPU; fine-grained word boxes for heuristics | Weaker on messy handwriting vs some deep models; see OCR section below |
+| **Rules before LLM** | Cost and latency; most fields resolved without API calls | Edge receipts need LLM or human review |
+| **Batched LLM** | Fewer round-trips when several jobs wait | More complex parsing; fallback to single-job on failure |
+| **Strict validation gate** | Single business-quality checkpoint | More `NEEDS_REVIEW` if rules are tight |
+| **HTTP POST to `formResponse`** | Simple, scriptable, no browser | Field IDs must match form; not “official” Forms API |
+| **Human review file** | Auditable queue for automation limits | Manual follow-up outside the happy path |
 
 ---
 
-## Google Form submission
+## Deterministic methods versus AI
 
-The form integration is **HTTP POST** from [`submit/service.py`](submit/service.py) to Google’s **`formResponse`** endpoint. It is **not** the Google Forms API with OAuth; it mirrors a browser submission.
+| Use deterministic (regex, Tesseract, arithmetic validation) when… | Use Gemini when… |
+|---------------------------------------------------------------------|------------------|
+| The task is **pattern-matching** on OCR text with known layouts | Fields are **semantically ambiguous** (multiple plausible totals, noisy vendor strings) |
+| You need **reproducible** behavior and **auditability** | Rule confidences fall **below routing thresholds** |
+| Cost and **latency** must stay predictable | Validation failed but a **stricter prompt / retry** may recover structured JSON |
+| You can define **hard validation rules** (date ranges, numeric sanity) | OCR text is too incomplete for reliable regex capture |
 
-### What gets sent
+The system **defaults to determinism** and treats the LLM as a **targeted fallback** and **retry escalator**, not the primary reader of every receipt.
 
-- Only rows from the **`valid_invoices`** array in **`pipeline_export.json`**. Those are **successful** pipeline outcomes (`status` **`SUCCESS`** after validation).
-- Rows that failed validation, went to **LLM** but never passed, or sit in **`needs_human_review`** are **not** in `valid_invoices` and are **never** posted.
-- Each invoice becomes **application/x-www-form-urlencoded** fields: vendor, date, total, mapped via **`SUBMIT_ENTRY_*`** (the `entry.xxxxx` IDs from the form).
+---
 
-### Configuration
+## Use of AI
 
-| Variable | Role |
-|----------|------|
-| `SUBMIT_FORM_URL` | Full URL ending in `/formResponse` |
-| `SUBMIT_ENTRY_VENDOR` / `SUBMIT_ENTRY_DATE` / `SUBMIT_ENTRY_TOTAL` | Form field IDs (`entry.…`) |
-| `SUBMIT_AFTER_PIPELINE` | `1` (default): run submit after `main.py` one-shot; `0`: skip unless `--submit-form` |
-| `SUBMIT_MAX_RETRIES`, `SUBMIT_DELAY`, `SUBMIT_TIMEOUT` | Per-invoice retries, pause between posts, HTTP timeout |
+### Where AI is used
 
-Copy IDs from the form editor: **⋮ → Get pre-filled link**, submit a test row, and copy query parameter names into `.env`.
+- **Google Gemini** ([`llm/`](llm/), [`pipeline/llm_batch/`](pipeline/llm_batch/)) for structured extraction when **post-OCR confidences** are low or when **validation** schedules an LLM retry with a stricter **strategy** (`after_validation_fail`, `strict_json`, `ocr_retry`).
 
-### When it runs
+### Why it was appropriate
 
-- **Automatic:** After export when you run `python main.py` and **`SUBMIT_AFTER_PIPELINE`** is enabled (default).
-- **Manual:** `python -m submit` (defaults to `results/pipeline_export.json`) or `python -m submit --export path/to/export.json`.
+- Receipts vary in layout, language, and print quality; **pure rules** miss ambiguous vendor strings, unusual date formats, or totals buried in noise.
+- The LLM consumes **OCR text** (and job context), not raw pixels in the batch path—keeping inputs **traceable** and prompts **versionable**.
+- **Batching** reduces cost versus per-image calls when many jobs need help at once.
 
-### Operational notes
+### Limitations and tradeoffs
 
-- The client sends a normal **browser-like User-Agent**; responses in the **2xx** range are treated as success.
-- If HTTP succeeds but the **spreadsheet stays empty**, the **`entry.xxxxx`** names usually do not match the live form — fix IDs and URL.
-- Rate limiting: **`SUBMIT_DELAY`** spaces posts so large batches do not hammer the endpoint.
+- **API quotas and latency** (rate limits, 429 retries via env).
+- **Hallucination / format risk** mitigated by **JSON parsing**, **validation**, and **retries**, not blind trust.
+- **Batch responses** can be malformed; the code **falls back to single-job** calls.
+- Model upgrades may change behavior; keep **golden tests** or spot-check exports in production.
+
+---
+
+## OCR engine: Tesseract versus alternatives
+
+| Engine | Strengths | Weaknesses |
+|--------|-----------|------------|
+| **Tesseract** | Open source, CPU-friendly, excellent **word-level boxes** and confidences for heuristics, widely deployed | Weaker on some handwriting / low-DPI photos without tuning |
+| **EasyOCR** | Deep learning, often strong on scene text | Heavier dependencies (PyTorch/GPU optional); different output shape—would require re-plumbing extractors |
+| **PaddleOCR** | Strong accuracy on many benchmarks | Same integration cost; larger footprint |
+
+**Why Tesseract here:** the extractors rely on **Tesseract’s per-token confidence and layout** to score vendor lines and totals. Swapping engines is possible but is a **project-level** change (new OCR adapter, re-tuned heuristics, re-benchmarked thresholds).
+
+---
+
+## Google Form submission: HTTP POST versus browser automation
+
+**Chosen approach:** direct **`requests.post`** to the form’s **`formResponse`** URL with `application/x-www-form-urlencoded` body ([`submit/service.py`](submit/service.py)).
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **HTTP POST (current)** | Fast, headless, easy to retry and log; no browser binary | Must keep `entry.xxxxx` IDs in sync with the form |
+| **Playwright / Selenium / Puppeteer** | Can drive dynamic UIs | Heavier, flakier, slower; unnecessary for standard Google Forms public endpoints |
+
+Public Google Forms continue to accept well-formed POSTs mirroring the browser; for **batch server-side submission**, HTTP is the **reliable, minimal** interface.
+
+---
+
+## Reliability and robustness (real-world variability)
+
+| Challenge | Mitigation |
+|-----------|------------|
+| **OCR noise** | Line filtering, negative phrase lists, minimum scores, handwriting detection for vendor; date patterns reject time-like strings; totals use label priors and skip rows for “change”, “subtotal”, etc. |
+| **Missing / incomplete fields** | Low confidences **route to LLM**; validation rejects empty or nonsensical values; **retries** with stricter strategies |
+| **Multiple monetary amounts** | Total extractor scores **row labels** and picks plausible amounts on the best-scoring lines; validation enforces positive, bounded totals |
+| **Format inconsistencies** | Date normalization tries several string formats; validation accepts a small set of normalized forms |
+| **Ambiguous vendor lines** | Scoring favors business-like tokens and penalizes long multi-word address-like lines |
+
+---
+
+## Validation, ambiguous outputs, and retry strategies
+
+- **Validation** ([`pipeline/validation/validation_layer.py`](pipeline/validation/validation_layer.py)) enforces: non-empty vendor that is not “numeric-only”, parseable **reasonable** date (not future, not absurdly old), positive **bounded** total. Optional Pydantic model pass for consistency.
+- **Ambiguous LLM output:** If JSON parsing fails or fields are missing, LLM stage triggers **retries** with different **strategies** ([`workers/retry/retry_strategy.py`](workers/retry/retry_strategy.py)): e.g. move from default extraction to **stricter JSON**, then **OCR-focused** prompts after validation failures.
+- **Backoff:** Retries land on **`RETRY_ZSET`** with increasing delay to avoid hot-looping APIs or the database.
+
+---
+
+## Failure modes
+
+### What types of errors occur
+
+| Area | Examples |
+|------|----------|
+| **OCR** | Poor image quality, skew, low DPI → empty or wrong text |
+| **Rules** | No line passes vendor heuristics; multiple totals compete |
+| **LLM** | Parse errors, API errors, wrong field association in batch |
+| **Validation** | Future date, empty vendor, non-positive total |
+| **Infrastructure** | Redis down, SQLite busy, worker crash |
+
+### How the system handles them
+
+- **Retries** with exponential backoff and **strategy escalation** for LLM and validation failures.
+- **Max retries** → **`NEEDS_REVIEW`** with **`human_review_queue.json`** (never auto-submitted to the form).
+- **Metrics** (`metrics` in export) and structured logs for cross-process visibility.
+- **Batch LLM failure** → automatic **single-invoice** fallback.
+
+---
+
+## Project intricacies (quick reference)
+
+| Topic | Behavior |
+|-------|----------|
+| **Batch vs single LLM** | Prefer one request for many jobs; single-invoice on parse errors or missing `job_id` |
+| **Strategy merge** | Strictest prompt wins in a batch (`merge_batch_strategies`) |
+| **Metrics** | Reset each run unless `EVAL_KEEP_METRICS=1` |
+| **Human review file** | Fresh file per run unless `EVAL_ACCUMULATE_HUMAN_REVIEW=1` |
+| **SQLite** | WAL + timeouts for concurrent workers |
+
+For package layout, see [`workers/README.md`](workers/README.md).
+
+---
+
+## Google Form submission (details)
+
+The integration is **HTTP POST** to Google’s **`formResponse`** endpoint ([`submit/service.py`](submit/service.py)) — not the OAuth Forms API; it mirrors a browser submission.
+
+- **Sent:** only **`valid_invoices`** from `pipeline_export.json` (`SUCCESS` rows). **Never** human-review rows.
+- **Fields:** `SUBMIT_FORM_URL`, `SUBMIT_ENTRY_VENDOR`, `SUBMIT_ENTRY_DATE`, `SUBMIT_ENTRY_TOTAL`.
+- **Runtime:** `SUBMIT_AFTER_PIPELINE`, `--no-submit-form` / `--submit-form`; manual: `python -m submit`.
+- **Robustness:** browser-like **User-Agent**, treat **2xx** as success, **`SUBMIT_DELAY`** between posts, retries with backoff.
 
 ---
 
@@ -236,18 +386,18 @@ Copy IDs from the form editor: **⋮ → Get pre-filled link**, submit a test ro
 ## Project layout (abbreviated)
 
 ```
-├── main.py                 # Orchestrator: workers → ingest → wait → export → eval → form
-├── config/                 # settings, logging
-├── pipeline/               # Validation, batch LLM, prompts, evaluation summary
-├── workers/                # Queues, DB, workers, export, human review
-├── ocr/                    # Tesseract helpers
-├── llm/                    # Gemini client
-├── submit/                 # Google Form POST
-├── invoice_submission/     # Legacy-compatible wrappers (same form config)
-├── data/                   # SQLite (`invoices.db`)
-├── images/                 # Default input images
-├── results/                # Exports and evaluation output
-└── docker-compose.yml      # Local Redis
+├── main.py
+├── config/
+├── pipeline/               # stages, llm_batch, validation, evaluation
+├── workers/                # tasks, core workers, Redis, DB, retry
+├── ocr/
+├── llm/
+├── extractors/             # vendor, date, total heuristics
+├── submit/
+├── data/                   # SQLite
+├── images/
+├── results/
+└── docker-compose.yml
 ```
 
 ---
@@ -257,13 +407,25 @@ Copy IDs from the form editor: **⋮ → Get pre-filled link**, submit a test ro
 | Symptom | What to check |
 |---------|----------------|
 | Redis connection errors | `docker compose ps`, `REDIS_URL` |
-| SQLite locked | WAL configured; close external DB viewers |
-| Empty `valid_invoices` | OCR/validation failures; see `needs_human_review` |
-| Form 2xx but no rows | Wrong `entry.xxxxx` or form URL |
-| High `llm_single_calls` | Batch parse failures — inspect logs for `batch_parse_failed_fallback_singles` |
-| Gemini 429 / quota | `GEMINI_RPM`, `GEMINI_429_MAX_RETRIES`, reduce `OCR_PROCESSES` / batch frequency |
+| SQLite locked | WAL; close external DB viewers |
+| Empty `valid_invoices` | See `needs_human_review` |
+| Form 2xx but no rows | Wrong `entry.xxxxx` |
+| High `llm_single_calls` | Batch parse failures in logs |
+| Gemini 429 / quota | `GEMINI_RPM`, `GEMINI_429_MAX_RETRIES` |
 
-Logs: [`logs/app.log`](logs/app.log) via [`config/logger_setup.py`](config/logger_setup.py).
+Logs: [`logs/app.log`](logs/app.log).
+
+---
+
+## Improvements (with more time)
+
+- **Observability:** OpenTelemetry, JSON logs, Prometheus scrape of Redis metrics.
+- **Testing:** Golden OCR fixtures, contract tests on exports, mocked LLM.
+- **Idempotent submission:** Track submitted `job_id` to avoid duplicate form posts on re-runs.
+- **OCR:** Optional second engine for low-confidence pages; A/B tune thresholds on a labeled set.
+- **Forms:** Official Google APIs or Apps Script if OAuth / ownership policies require it.
+- **SDK migration:** `google.genai` when migrating off deprecated `google.generativeai` patterns.
+- **Deployment:** Container images, separate LLM worker tier, DLQ review UI.
 
 ---
 
