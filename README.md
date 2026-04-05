@@ -138,7 +138,7 @@ The system does **not** use a single global “model confidence” for vendor, d
 - On eligible rows, **numeric tokens** are parsed as currency amounts (with simple normalization for `RM`, commas, common OCR confusions). When several numbers appear, the implementation tends toward the **largest plausible amount** on that row (totals are often the dominant figure next to the label).
 - Among labeled rows, candidates are ordered by **label strength** and **vertical position** (lower on the receipt often corresponds to the final total). The winning candidate’s label score is **mapped** to a confidence in `[0, 1]`.
 
-### Example: Shell fuel receipt
+### Example: OCR on receipt
 
 The following real receipt (**LEONG HENG SHELL SERVICE STATION**) illustrates typical layout: vendor in the header, several monetary amounts (e.g. Total, Cash, Total Gross), and a **date** in a footer row next to **time** (`20/06/18` with `00:05`). The second image shows the same scan with **vendor** (red), **total** (green, here aligned with the gross total line), and **date** (blue) highlighted—mirroring how heuristics target regions before confidence scores feed the routing step below.
 
@@ -314,6 +314,8 @@ The system **defaults to determinism** and treats the LLM as a **targeted fallba
 
 Public Google Forms continue to accept well-formed POSTs mirroring the browser; for **batch server-side submission**, HTTP is the **reliable, minimal** interface.
 
+submission info is given below:
+![Submission info (rann on 33 receipts)](docs/images/google_form_submission_screenshot.png)
 ---
 
 ## Reliability and robustness (real-world variability)
@@ -376,6 +378,8 @@ For package layout, see [`workers/README.md`](workers/README.md).
 The integration is **HTTP POST** to Google’s **`formResponse`** endpoint ([`submit/service.py`](submit/service.py)) — not the OAuth Forms API; it mirrors a browser submission.
 
 - **Sent:** only **`valid_invoices`** from `pipeline_export.json` (`SUCCESS` rows). **Never** human-review rows.
+- **Date field:** normalized for POST using **`SUBMIT_DATE_FORMAT`** (default **`iso`** = `YYYY-MM-DD`). Google’s built-in **Date** question rejects `DD/MM/YYYY` and returns HTTP 400; use `iso` unless the form uses a **short-answer** text field, then set `SUBMIT_DATE_FORMAT=dmy` for `DD/MM/YYYY`.
+- **Hidden fields:** the client **GET**s the viewform page once per batch and sends **`fbzx`** / **`fvv`** with each POST (required by Google; without them you get HTTP 400 “Something went wrong”).
 - **Fields:** `SUBMIT_FORM_URL`, `SUBMIT_ENTRY_VENDOR`, `SUBMIT_ENTRY_DATE`, `SUBMIT_ENTRY_TOTAL`.
 - **Runtime:** `SUBMIT_AFTER_PIPELINE`, `--no-submit-form` / `--submit-form`; manual: `python -m submit`.
 - **Robustness:** browser-like **User-Agent**, treat **2xx** as success, **`SUBMIT_DELAY`** between posts, retries with backoff.

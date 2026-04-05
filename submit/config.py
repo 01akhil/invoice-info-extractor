@@ -5,6 +5,7 @@ from __future__ import annotations
 from config import settings
 
 FORM_URL = settings.SUBMIT_FORM_URL
+DATE_FORMAT = settings.SUBMIT_DATE_FORMAT
 ENTRY_VENDOR = settings.SUBMIT_ENTRY_VENDOR
 ENTRY_DATE = settings.SUBMIT_ENTRY_DATE
 ENTRY_TOTAL = settings.SUBMIT_ENTRY_TOTAL
