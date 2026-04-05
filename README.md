@@ -31,6 +31,7 @@ The primary entrypoint is [`main.py`](main.py). **Google Forms** submission (opt
 
 ```bash
 pip install -r requirements.txt
+pip install -e .   # recommended: install package so imports and `python -m receipt_pipeline...` work without PYTHONPATH (especially on Windows + multiprocessing)
 docker compose up -d
 ```
 
@@ -44,7 +45,7 @@ See [`docker-compose.yml`](docker-compose.yml) for the bundled Redis service.
 2. Set at least `GEMINI_API_KEY`.
 3. Adjust paths (`IMAGES_DIR`, `TESSERACT_CMD`), Redis URL, pipeline timeouts, worker counts, and LLM batch settings as needed.
 
-All tunables live in [`config/settings.py`](config/settings.py) (loaded via `python-dotenv`). [`workers/config.py`](workers/config.py) re-exports queue and worker constants for code under `workers/`.
+All tunables live in [`config/settings.py`](config/settings.py) (loaded via `python-dotenv`). [`src/receipt_pipeline/workers/config.py`](src/receipt_pipeline/workers/config.py) re-exports queue and worker constants for the `receipt_pipeline.workers` package.
 
 ---
 
@@ -84,7 +85,7 @@ Start Redis first (`docker compose up -d`), then run `python main.py` from the p
 **Goal:** Re-running ingestion or restarting workers must not create duplicate work for the same logical job.
 
 - **Stable identity:** Each invoice is assigned a **`job_id`** (UUID) at first ingest. That identifier is the primary key in SQLite (`invoice_jobs`).
-- **Ingest:** If [`workers/tasks/ingestion.py`](workers/tasks/ingestion.py) sees a row that already exists for a given `job_id`, it **does not** enqueue another OCR message. The pipeline remains safe to call twice with the same id.
+- **Ingest:** If [`src/receipt_pipeline/workers/orchestration/ingestion.py`](src/receipt_pipeline/workers/orchestration/ingestion.py) sees a row that already exists for a given `job_id`, it **does not** enqueue another OCR message. The pipeline remains safe to call twice with the same id.
 - **State is authoritative:** Redis queues are **ephemeral**; the **database row** is the source of truth for whether a job exists and what stage it reached. Clearing Redis does not duplicate rows; it may require re-enqueueing work in edge cases, but duplicate **rows** are avoided by the ingest check.
 - **Exports:** Each run overwrites the latest `pipeline_export.json` / `evaluation_summary.json` for observability of the **current** batch (unless you opt into accumulating human-review history via env).
 
@@ -96,15 +97,15 @@ The architecture diagram below includes an **idempotent ingest** gate to show th
 
 | Layer | Role |
 |-------|------|
-| **Orchestrator** ([`workers/tasks/orchestrator.py`](workers/tasks/orchestrator.py), [`main.py`](main.py)) | Starts workers, ingests folder, waits for completion, exports JSON/CSV, evaluation summary, optional form submit. |
+| **Orchestrator** ([`src/receipt_pipeline/workers/orchestration/orchestrator.py`](src/receipt_pipeline/workers/orchestration/orchestrator.py), [`main.py`](main.py)) | Starts workers, ingests folder, waits for completion, exports JSON/CSV, evaluation summary, optional form submit. |
 | **Redis** | List queues (`Q_OCR`, `Q_POST_OCR`, `Q_LLM`, `Q_VALIDATE`) for fan-out work; **sorted set** `RETRY_ZSET` for time-delayed retries. |
 | **SQLite** | Durable `InvoiceJob` records: OCR snapshots, extraction payloads, status, retries, errors. |
-| **OCR** ([`workers/core/ocr_worker.py`](workers/core/ocr_worker.py), [`ocr/ocr.py`](ocr/ocr.py)) | Multiprocess Tesseract; writes `ocr_snapshot`. |
-| **Rules** ([`workers/core/post_ocr_worker.py`](workers/core/post_ocr_worker.py), [`extractors/`](extractors/), [`pipeline/stages.py`](pipeline/stages.py)) | Heuristic vendor/date/total + confidences; route to validate or LLM. |
-| **LLM** ([`workers/core/llm_worker.py`](workers/core/llm_worker.py), [`pipeline/llm_batch/`](pipeline/llm_batch/), [`llm/`](llm/)) | Batched or single Gemini calls; structured JSON mapped back per `job_id`. |
-| **Validation** ([`workers/core/validate_worker.py`](workers/core/validate_worker.py), [`pipeline/validation/validation_layer.py`](pipeline/validation/validation_layer.py)) | Schema and business rules; success, retry with new strategy, or human review. |
-| **Retry scheduler** ([`workers/retry/retry_ops.py`](workers/retry/retry_ops.py)) | Moves due retries from `RETRY_ZSET` back onto target queues. |
-| **Submit** ([`submit/service.py`](submit/service.py)) | POST only `valid_invoices` to Google Forms. |
+| **OCR** ([`src/receipt_pipeline/workers/core/ocr_worker.py`](src/receipt_pipeline/workers/core/ocr_worker.py), [`src/receipt_pipeline/ocr/ocr.py`](src/receipt_pipeline/ocr/ocr.py)) | Multiprocess Tesseract; writes `ocr_snapshot`. |
+| **Rules** ([`src/receipt_pipeline/workers/core/post_ocr_worker.py`](src/receipt_pipeline/workers/core/post_ocr_worker.py), [`src/receipt_pipeline/extractors/`](src/receipt_pipeline/extractors/), [`src/receipt_pipeline/pipeline/stages.py`](src/receipt_pipeline/pipeline/stages.py)) | Heuristic vendor/date/total + confidences; route to validate or LLM. |
+| **LLM** ([`src/receipt_pipeline/workers/core/llm_worker.py`](src/receipt_pipeline/workers/core/llm_worker.py), [`src/receipt_pipeline/pipeline/llm_batch/`](src/receipt_pipeline/pipeline/llm_batch/), [`src/receipt_pipeline/llm/`](src/receipt_pipeline/llm/)) | Batched or single Gemini calls; structured JSON mapped back per `job_id`. |
+| **Validation** ([`src/receipt_pipeline/workers/core/validate_worker.py`](src/receipt_pipeline/workers/core/validate_worker.py), [`src/receipt_pipeline/pipeline/validation/validation_layer.py`](src/receipt_pipeline/pipeline/validation/validation_layer.py)) | Schema and business rules; success, retry with new strategy, or human review. |
+| **Retry scheduler** ([`src/receipt_pipeline/workers/retry/retry_ops.py`](src/receipt_pipeline/workers/retry/retry_ops.py)) | Moves due retries from `RETRY_ZSET` back onto target queues. |
+| **Submit** ([`src/receipt_pipeline/submission/service.py`](src/receipt_pipeline/submission/service.py)) | POST only `valid_invoices` to Google Forms. |
 
 **Data flow (happy path):** image file → ingest (DB row + `Q_OCR`) → OCR (`ocr_snapshot`, `Q_POST_OCR`) → rules (confidences) → either **`Q_VALIDATE`** (fast path) or **`Q_LLM`** → **`Q_VALIDATE`** → `SUCCESS` → export → optional form.
 
@@ -142,9 +143,9 @@ The system does **not** use a single global “model confidence” for vendor, d
 
 The following real receipt (**LEONG HENG SHELL SERVICE STATION**) illustrates typical layout: vendor in the header, several monetary amounts (e.g. Total, Cash, Total Gross), and a **date** in a footer row next to **time** (`20/06/18` with `00:05`). The second image shows the same scan with **vendor** (red), **total** (green, here aligned with the gross total line), and **date** (blue) highlighted—mirroring how heuristics target regions before confidence scores feed the routing step below.
 
-![Original thermal receipt (Shell station)](docs/images/shell_receipt_original.png)
+![Original thermal receipt (Shell station)](docs/images/receipt_original.png)
 
-![Same receipt with vendor, total, and date regions marked](docs/images/shell_receipt_annotated.png)
+![Same receipt with vendor, total, and date regions marked](docs/images/receipt_annotated.png)
 
 ### Routing thresholds (rules → LLM)
 
@@ -158,42 +159,42 @@ Each image becomes one **`InvoiceJob`** (`job_id`). State is stored in SQLite; *
 
 ### 1. Ingestion
 
-[`workers/tasks/ingestion.py`](workers/tasks/ingestion.py) scans **only the top level** of `IMAGES_DIR` for `.jpg` / `.jpeg` / `.png`, creates a row (`PENDING`), and **LPUSH**es `{"job_id": ...}` to **`Q_OCR`**. **Idempotent:** if the `job_id` already exists in the DB, no duplicate row and no duplicate enqueue.
+[`src/receipt_pipeline/workers/orchestration/ingestion.py`](src/receipt_pipeline/workers/orchestration/ingestion.py) scans **only the top level** of `IMAGES_DIR` for `.jpg` / `.jpeg` / `.png`, creates a row (`PENDING`), and **LPUSH**es `{"job_id": ...}` to **`Q_OCR`**. **Idempotent:** if the `job_id` already exists in the DB, no duplicate row and no duplicate enqueue.
 
 ### 2. OCR (multiprocess)
 
-[`workers/core/ocr_worker.py`](workers/core/ocr_worker.py) runs **N parallel processes** (`OCR_PROCESSES`). Each job: load image → **Tesseract** via [`ocr/ocr.py`](ocr/ocr.py) → serialize OCR regions into **`ocr_snapshot`** on the job row → status **`OCR_DONE`** → enqueue **`Q_POST_OCR`**. Failures increment **`retry_count`**; after **`max_retries`**, the job is finalized as **`NEEDS_REVIEW`** and appended to **`human_review_queue.json`**.
+[`src/receipt_pipeline/workers/core/ocr_worker.py`](src/receipt_pipeline/workers/core/ocr_worker.py) runs **N parallel processes** (`OCR_PROCESSES`). Each job: load image → **Tesseract** via [`src/receipt_pipeline/ocr/ocr.py`](src/receipt_pipeline/ocr/ocr.py) → serialize OCR regions into **`ocr_snapshot`** on the job row → status **`OCR_DONE`** → enqueue **`Q_POST_OCR`**. Failures increment **`retry_count`**; after **`max_retries`**, the job is finalized as **`NEEDS_REVIEW`** and appended to **`human_review_queue.json`**.
 
 ### 3. Post-OCR rules and routing
 
-[`workers/core/post_ocr_worker.py`](workers/core/post_ocr_worker.py) reads **`ocr_snapshot`**, runs **regex/heuristic extraction** ([`pipeline/stages.py`](pipeline/stages.py)), and computes confidences for vendor, total, and date.
+[`src/receipt_pipeline/workers/core/post_ocr_worker.py`](src/receipt_pipeline/workers/core/post_ocr_worker.py) reads **`ocr_snapshot`**, runs **regex/heuristic extraction** ([`src/receipt_pipeline/pipeline/stages.py`](src/receipt_pipeline/pipeline/stages.py)), and computes confidences for vendor, total, and date.
 
 - If **all** confidences pass thresholds (**fast path**): build **`extraction_payload`** with source **`OCR_RULE`**, set status **`VALIDATING`**, enqueue **`Q_VALIDATE`** — **no LLM call**.
 - If **any** field is too uncertain: increment **`llm_fallback_routed`**, set **`LLM_PENDING`**, **LPUSH** to **`Q_LLM`** with a **strategy** string (e.g. `default`, later `after_validation_fail`, `ocr_retry`).
 
 ### 4. LLM extraction — batched multi-invoice calls
 
-[`workers/core/llm_worker.py`](workers/core/llm_worker.py) implements **batch collection**: block on **`Q_LLM`**, then pull more messages until **`LLM_BATCH_MAX`** jobs are collected (or the queue is empty).
+[`src/receipt_pipeline/workers/core/llm_worker.py`](src/receipt_pipeline/workers/core/llm_worker.py) implements **batch collection**: block on **`Q_LLM`**, then pull more messages until **`LLM_BATCH_MAX`** jobs are collected (or the queue is empty).
 
-- **Batch path:** [`pipeline/llm_batch/batch_llm.py`](pipeline/llm_batch/batch_llm.py) merges strategies with **`merge_batch_strategies`**, builds **one prompt** ([`pipeline/llm_batch/prompt_builder.py`](pipeline/llm_batch/prompt_builder.py)), calls Gemini **once**, parses JSON ([`pipeline/llm_batch/batch_parser.py`](pipeline/llm_batch/batch_parser.py)). Per `job_id`, write **`extraction_payload`**, **`VALIDATING`**, **`Q_VALIDATE`**.
+- **Batch path:** [`src/receipt_pipeline/pipeline/llm_batch/batch_llm.py`](src/receipt_pipeline/pipeline/llm_batch/batch_llm.py) merges strategies with **`merge_batch_strategies`**, builds **one prompt** ([`src/receipt_pipeline/pipeline/llm_batch/prompt_builder.py`](src/receipt_pipeline/pipeline/llm_batch/prompt_builder.py)), calls Gemini **once**, parses JSON ([`src/receipt_pipeline/pipeline/llm_batch/batch_parser.py`](src/receipt_pipeline/pipeline/llm_batch/batch_parser.py)). Per `job_id`, write **`extraction_payload`**, **`VALIDATING`**, **`Q_VALIDATE`**.
 
 - **Fallback:** If the batch response does not parse or a **`job_id`** is missing, those jobs run **single-invoice** Gemini calls.
 
 ### 5. Validation
 
-[`workers/core/validate_worker.py`](workers/core/validate_worker.py) runs [`pipeline/validation/validation_layer.py`](pipeline/validation/validation_layer.py).
+[`src/receipt_pipeline/workers/core/validate_worker.py`](src/receipt_pipeline/workers/core/validate_worker.py) runs [`src/receipt_pipeline/pipeline/validation/validation_layer.py`](src/receipt_pipeline/pipeline/validation/validation_layer.py).
 
 - **Pass:** Normalize fields, set **`SUCCESS`**, increment **`success_total`**.
-- **Fail (retries left):** Schedule **`RETRY_ZSET`** → **`Q_LLM`** with a **new strategy** ([`workers/retry/retry_strategy.py`](workers/retry/retry_strategy.py)).
+- **Fail (retries left):** Schedule **`RETRY_ZSET`** → **`Q_LLM`** with a **new strategy** ([`src/receipt_pipeline/workers/retry/retry_strategy.py`](src/receipt_pipeline/workers/retry/retry_strategy.py)).
 - **Fail (no retries left):** **`NEEDS_REVIEW`**, **`human_review_queue.json`**.
 
 ### 6. Retry scheduler
 
-[`workers/retry/retry_ops.py`](workers/retry/retry_ops.py): due retries are moved back to target queues. Delay ≈ **`RETRY_BASE_SEC * 2^retry_count`**, capped by **`RETRY_CAP_SEC`**, with jitter.
+[`src/receipt_pipeline/workers/retry/retry_ops.py`](src/receipt_pipeline/workers/retry/retry_ops.py): due retries are moved back to target queues. Delay ≈ **`RETRY_BASE_SEC * 2^retry_count`**, capped by **`RETRY_CAP_SEC`**, with jitter.
 
 ### 7. Orchestrator shutdown and export
 
-[`workers/tasks/orchestrator.py`](workers/tasks/orchestrator.py) waits for terminal states or timeout, then [`workers/tasks/export_results.py`](workers/tasks/export_results.py) and [`pipeline/evaluation/evaluation_summary.py`](pipeline/evaluation/evaluation_summary.py).
+[`src/receipt_pipeline/workers/orchestration/orchestrator.py`](src/receipt_pipeline/workers/orchestration/orchestrator.py) waits for terminal states or timeout, then [`src/receipt_pipeline/workers/orchestration/export_results.py`](src/receipt_pipeline/workers/orchestration/export_results.py) and [`src/receipt_pipeline/pipeline/evaluation/evaluation_summary.py`](src/receipt_pipeline/pipeline/evaluation/evaluation_summary.py).
 
 ### Architecture diagram (with idempotent ingest)
 
@@ -274,7 +275,7 @@ The system **defaults to determinism** and treats the LLM as a **targeted fallba
 
 ### Where AI is used
 
-- **Google Gemini** ([`llm/`](llm/), [`pipeline/llm_batch/`](pipeline/llm_batch/)) for structured extraction when **post-OCR confidences** are low or when **validation** schedules an LLM retry with a stricter **strategy** (`after_validation_fail`, `strict_json`, `ocr_retry`).
+- **Google Gemini** ([`src/receipt_pipeline/llm/`](src/receipt_pipeline/llm/), [`src/receipt_pipeline/pipeline/llm_batch/`](src/receipt_pipeline/pipeline/llm_batch/)) for structured extraction when **post-OCR confidences** are low or when **validation** schedules an LLM retry with a stricter **strategy** (`after_validation_fail`, `strict_json`, `ocr_retry`).
 
 ### Why it was appropriate
 
@@ -305,7 +306,7 @@ The system **defaults to determinism** and treats the LLM as a **targeted fallba
 
 ## Google Form submission: HTTP POST versus browser automation
 
-**Chosen approach:** direct **`requests.post`** to the form’s **`formResponse`** URL with `application/x-www-form-urlencoded` body ([`submit/service.py`](submit/service.py)).
+**Chosen approach:** direct **`requests.post`** to the form’s **`formResponse`** URL with `application/x-www-form-urlencoded` body ([`src/receipt_pipeline/submission/service.py`](src/receipt_pipeline/submission/service.py)).
 
 | Approach | Pros | Cons |
 |----------|------|------|
@@ -332,8 +333,8 @@ submission info is given below:
 
 ## Validation, ambiguous outputs, and retry strategies
 
-- **Validation** ([`pipeline/validation/validation_layer.py`](pipeline/validation/validation_layer.py)) enforces: non-empty vendor that is not “numeric-only”, parseable **reasonable** date (not future, not absurdly old), positive **bounded** total. Optional Pydantic model pass for consistency.
-- **Ambiguous LLM output:** If JSON parsing fails or fields are missing, LLM stage triggers **retries** with different **strategies** ([`workers/retry/retry_strategy.py`](workers/retry/retry_strategy.py)): e.g. move from default extraction to **stricter JSON**, then **OCR-focused** prompts after validation failures.
+- **Validation** ([`src/receipt_pipeline/pipeline/validation/validation_layer.py`](src/receipt_pipeline/pipeline/validation/validation_layer.py)) enforces: non-empty vendor that is not “numeric-only”, parseable **reasonable** date (not future, not absurdly old), positive **bounded** total. Optional Pydantic model pass for consistency.
+- **Ambiguous LLM output:** If JSON parsing fails or fields are missing, LLM stage triggers **retries** with different **strategies** ([`src/receipt_pipeline/workers/retry/retry_strategy.py`](src/receipt_pipeline/workers/retry/retry_strategy.py)): e.g. move from default extraction to **stricter JSON**, then **OCR-focused** prompts after validation failures.
 - **Backoff:** Retries land on **`RETRY_ZSET`** with increasing delay to avoid hot-looping APIs or the database.
 
 ---
@@ -369,19 +370,19 @@ submission info is given below:
 | **Human review file** | Fresh file per run unless `EVAL_ACCUMULATE_HUMAN_REVIEW=1` |
 | **SQLite** | WAL + timeouts for concurrent workers |
 
-For package layout, see [`workers/README.md`](workers/README.md).
+For package layout, see [`src/receipt_pipeline/workers/README.md`](src/receipt_pipeline/workers/README.md).
 
 ---
 
 ## Google Form submission (details)
 
-The integration is **HTTP POST** to Google’s **`formResponse`** endpoint ([`submit/service.py`](submit/service.py)) — not the OAuth Forms API; it mirrors a browser submission.
+The integration is **HTTP POST** to Google’s **`formResponse`** endpoint ([`src/receipt_pipeline/submission/service.py`](src/receipt_pipeline/submission/service.py)) — not the OAuth Forms API; it mirrors a browser submission.
 
 - **Sent:** only **`valid_invoices`** from `pipeline_export.json` (`SUCCESS` rows). **Never** human-review rows.
 - **Date field:** normalized for POST using **`SUBMIT_DATE_FORMAT`** (default **`iso`** = `YYYY-MM-DD`). Google’s built-in **Date** question rejects `DD/MM/YYYY` and returns HTTP 400; use `iso` unless the form uses a **short-answer** text field, then set `SUBMIT_DATE_FORMAT=dmy` for `DD/MM/YYYY`.
 - **Hidden fields:** the client **GET**s the viewform page once per batch and sends **`fbzx`** / **`fvv`** with each POST (required by Google; without them you get HTTP 400 “Something went wrong”).
 - **Fields:** `SUBMIT_FORM_URL`, `SUBMIT_ENTRY_VENDOR`, `SUBMIT_ENTRY_DATE`, `SUBMIT_ENTRY_TOTAL`.
-- **Runtime:** `SUBMIT_AFTER_PIPELINE`, `--no-submit-form` / `--submit-form`; manual: `python -m submit`.
+- **Runtime:** `SUBMIT_AFTER_PIPELINE`, `--no-submit-form` / `--submit-form`; manual: `python -m receipt_pipeline.submission`.
 - **Robustness:** browser-like **User-Agent**, treat **2xx** as success, **`SUBMIT_DELAY`** between posts, retries with backoff.
 
 ---
@@ -390,25 +391,32 @@ The integration is **HTTP POST** to Google’s **`formResponse`** endpoint ([`su
 
 | Item | Description |
 |------|-------------|
-| `python -m workers.run_pipeline` | Workers only (no `main.py` ingest/export) |
-| `uvicorn workers.api:app` | Optional API ([`workers/api.py`](workers/api.py)) |
+| `python -m receipt_pipeline.workers.run_pipeline` | Workers only (no `main.py` ingest/export) |
+| `python -m receipt_pipeline.workers.orchestration.ingest_cli` | Enqueue images from `IMAGES_DIR` (or `--folder`) without full orchestration |
+| `uvicorn receipt_pipeline.workers.api:app` | Optional API ([`src/receipt_pipeline/workers/api.py`](src/receipt_pipeline/workers/api.py)) |
 
 ---
 
 ## Project layout (abbreviated)
 
 ```
-├── main.py
-├── config/
-├── pipeline/               # stages, llm_batch, validation, evaluation
-├── workers/                # tasks, core workers, Redis, DB, retry
-├── ocr/
-├── llm/
-├── extractors/             # vendor, date, total heuristics
-├── submit/
-├── data/                   # SQLite
-├── images/
-├── results/
+├── main.py                 # CLI entry; adds src/ to path if package not installed
+├── pyproject.toml          # package: receipt-pipeline (import name: receipt_pipeline)
+├── requirements.txt
+├── config/                 # settings, logging (env + dotenv)
+├── src/receipt_pipeline/
+│   ├── pipeline/           # stages, llm_batch, validation, evaluation
+│   ├── workers/            # orchestration, core workers, Redis, DB, retry, API
+│   ├── ocr/
+│   ├── llm/
+│   ├── extractors/
+│   ├── schemas/
+│   └── submission/         # Google Form HTTP POST
+├── tests/
+├── docs/
+├── data/                   # SQLite (default)
+├── images/                 # input images (IMAGES_DIR)
+├── results/                # exports, human review queue
 └── docker-compose.yml
 ```
 

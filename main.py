@@ -1,8 +1,17 @@
 from __future__ import annotations
+
 import argparse
 import multiprocessing
+import sys
+from pathlib import Path
+
+# Allow `python main.py` without prior `pip install -e .` (adds src/ to path).
+_SRC = Path(__file__).resolve().parent / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 from config.settings import PIPELINE_WAIT_TIMEOUT_SEC
-from workers.tasks.orchestrator import run_pipeline
+from receipt_pipeline.workers.orchestration.orchestrator import run_pipeline
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Invoice OCR pipeline (Redis + parallel workers).")
