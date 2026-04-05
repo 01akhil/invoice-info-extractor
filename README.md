@@ -64,7 +64,7 @@ This resets Redis metrics (unless `EVAL_KEEP_METRICS=1`), optionally resets `res
 | `python main.py --submit-form` | Force submit if `SUBMIT_AFTER_PIPELINE=0` in `.env` |
 | `python main.py --pipeline-daemon` | Keep workers after ingest (no automatic wait/export in this mode) |
 
-[`scripts/run_pipeline.ps1`](scripts/run_pipeline.ps1) starts Redis then runs `main.py` (PowerShell). [`scripts/run_pipeline.bat`](scripts/run_pipeline.bat) is available for cmd.
+Start Redis first (`docker compose up -d`), then run `python main.py` from the project root.
 
 ---
 
@@ -85,7 +85,7 @@ Each image becomes one **`InvoiceJob`** (`job_id`). State is stored in SQLite; *
 
 ### 1. Ingestion
 
-[`workers/pipelines/ingestion.py`](workers/pipelines/ingestion.py) scans **only the top level** of `IMAGES_DIR` for `.jpg` / `.jpeg` / `.png`, creates a row (`PENDING`), and **LPUSH**es `{"job_id": ...}` to **`Q_OCR`**. Re-ingesting the same `job_id` is idempotent (existing DB row is not duplicated).
+[`workers/tasks/ingestion.py`](workers/tasks/ingestion.py) scans **only the top level** of `IMAGES_DIR` for `.jpg` / `.jpeg` / `.png`, creates a row (`PENDING`), and **LPUSH**es `{"job_id": ...}` to **`Q_OCR`**. Re-ingesting the same `job_id` is idempotent (existing DB row is not duplicated).
 
 ### 2. OCR (multiprocess)
 
@@ -104,7 +104,7 @@ So many receipts never hit Gemini; only “hard” rows consume API quota.
 
 [`workers/core/llm_worker.py`](workers/core/llm_worker.py) implements **batch collection**: block on **`Q_LLM`** for up to **`LLM_BATCH_FIRST_WAIT_SEC`**, then pull more messages with short **`LLM_BATCH_INTER_WAIT_SEC`** timeouts until **`LLM_BATCH_MAX`** jobs are collected (or the queue is empty).
 
-- **Batch path:** [`pipeline/batch_llm.py`](pipeline/batch_llm.py) merges strategies with **`merge_batch_strategies`** (the strictest wins: e.g. `ocr_retry` over `default`), builds **one prompt** listing multiple `(job_id, image path, OCR text)` tuples ([`pipeline/prompt_builder.py`](pipeline/prompt_builder.py)), calls **`gemini_llm_call`** **once**, parses JSON with [`pipeline/batch_parser.py`](pipeline/batch_parser.py). For each `job_id` in the response, write **`extraction_payload`**, set **`VALIDATING`**, enqueue **`Q_VALIDATE`**. Metrics: **`llm_invocations`** += 1, **`llm_batch_calls`** += 1.
+- **Batch path:** [`pipeline/llm_batch/batch_llm.py`](pipeline/llm_batch/batch_llm.py) merges strategies with **`merge_batch_strategies`** (the strictest wins: e.g. `ocr_retry` over `default`), builds **one prompt** listing multiple `(job_id, image path, OCR text)` tuples ([`pipeline/llm_batch/prompt_builder.py`](pipeline/llm_batch/prompt_builder.py)), calls **`gemini_llm_call`** **once**, parses JSON with [`pipeline/llm_batch/batch_parser.py`](pipeline/llm_batch/batch_parser.py). For each `job_id` in the response, write **`extraction_payload`**, set **`VALIDATING`**, enqueue **`Q_VALIDATE`**. Metrics: **`llm_invocations`** += 1, **`llm_batch_calls`** += 1.
 
 - **Fallback:** If the batch response does not parse or a **`job_id`** is missing from the parsed map, those jobs run **`_execute_single_llm`** — **one Gemini call per invoice** — and metrics increment **`llm_single_calls`**.
 
@@ -114,7 +114,7 @@ This design **reduces API round-trips** when several invoices wait for the LLM a
 
 ### 5. Validation
 
-[`workers/core/validate_worker.py`](workers/core/validate_worker.py) runs [`pipeline/validation_layer.py`](pipeline/validation_layer.py) on **`extraction_payload`** (from rules or LLM).
+[`workers/core/validate_worker.py`](workers/core/validate_worker.py) runs [`pipeline/validation/validation_layer.py`](pipeline/validation/validation_layer.py) on **`extraction_payload`** (from rules or LLM).
 
 - **Pass:** Normalize vendor/date/total, set **`SUCCESS`**, persist final columns, increment **`success_total`**.
 - **Fail (retries left):** Schedule a **delayed retry** onto **`RETRY_ZSET`** with **`target_queue=Q_LLM`** and a **new strategy** from [`workers/retry/retry_strategy.py`](workers/retry/retry_strategy.py) (stricter prompt). After backoff, [`workers/retry/retry_ops.py`](workers/retry/retry_ops.py) moves the job back to **`Q_LLM`**.
@@ -126,7 +126,7 @@ A background thread runs **`retry_scheduler_loop`**: periodically inspects **`RE
 
 ### 7. Orchestrator shutdown and export
 
-[`main.py`](main.py) waits until all ingested jobs reach a **terminal** state (`SUCCESS`, **`NEEDS_REVIEW`**, legacy DLQ, etc.) or hits **timeout**. Then [`workers/pipelines/export_results.py`](workers/pipelines/export_results.py) writes **`pipeline_export.json`** / **`.csv`**, and [`pipeline/evaluation_summary.py`](pipeline/evaluation_summary.py) writes **`evaluation_summary.json`**.
+[`workers/tasks/orchestrator.py`](workers/tasks/orchestrator.py) (invoked from [`main.py`](main.py)) waits until all ingested jobs reach a **terminal** state (`SUCCESS`, **`NEEDS_REVIEW`**, legacy DLQ, etc.) or hits **timeout**. Then [`workers/tasks/export_results.py`](workers/tasks/export_results.py) writes **`pipeline_export.json`** / **`.csv`**, and [`pipeline/evaluation/evaluation_summary.py`](pipeline/evaluation/evaluation_summary.py) writes **`evaluation_summary.json`**.
 
 ### Architecture diagram
 
@@ -230,7 +230,6 @@ Copy IDs from the form editor: **⋮ → Get pre-filled link**, submit a test ro
 |------|-------------|
 | `python -m workers.run_pipeline` | Workers only (no `main.py` ingest/export) |
 | `uvicorn workers.api:app` | Optional API ([`workers/api.py`](workers/api.py)) |
-| [`scripts/evaluation_run.py`](scripts/evaluation_run.py) | Clean state helper, runs pipeline, prints outcomes |
 
 ---
 
@@ -245,7 +244,6 @@ Copy IDs from the form editor: **⋮ → Get pre-filled link**, submit a test ro
 ├── llm/                    # Gemini client
 ├── submit/                 # Google Form POST
 ├── invoice_submission/     # Legacy-compatible wrappers (same form config)
-├── scripts/                # PowerShell/batch, evaluation script
 ├── data/                   # SQLite (`invoices.db`)
 ├── images/                 # Default input images
 ├── results/                # Exports and evaluation output

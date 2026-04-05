@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from llm.gemini_llm import gemini_llm_call
-from pipeline.prompt_builder import build_prompt
-from pipeline.parser import parse_llm_response
+from pipeline.llm_batch.prompt_builder import build_prompt
+from pipeline.llm_batch.parser import parse_llm_response
 
 
 def ocr_to_text(ocr_results):

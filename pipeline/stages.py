@@ -1,6 +1,5 @@
 """
-Pipeline stages for queue-based processing.
-Keeps the same extraction logic as `processor.py` but splits OCR, rules, and LLM.
+Pipeline stages for queue-based processing: OCR snapshot serialization, rule extraction, routing.
 """
 
 from __future__ import annotations
@@ -11,7 +10,21 @@ from extractors.date_extractor import extract_invoice_date
 from extractors.total_extractor import extract_total
 from extractors.vendor_extractor import extract_vendor
 
-from pipeline.processor import _to_xywh
+
+def _to_xywh(bbox):
+    """Normalize any bbox format to (x, y, w, h) int tuple."""
+    if bbox is None:
+        return None
+    if isinstance(bbox, (tuple, list)) and len(bbox) == 4 and not isinstance(bbox[0], (list, tuple)):
+        return tuple(map(int, bbox))
+    if isinstance(bbox, (tuple, list)) and bbox and isinstance(bbox[0], (list, tuple)):
+        xs = [int(p[0]) for p in bbox]
+        ys = [int(p[1]) for p in bbox]
+        x, y = min(xs), min(ys)
+        return x, y, max(xs) - x, max(ys) - y
+    if isinstance(bbox, dict):
+        return int(bbox["x"]), int(bbox["y"]), int(bbox["w"]), int(bbox["h"])
+    return None
 
 
 def aggregate_ocr_confidence(ocr_results: list) -> float:
@@ -57,7 +70,7 @@ def serializable_to_ocr_results(data: list | None) -> list:
 def run_rule_extraction(path: str, ocr_results: list) -> dict[str, Any]:
     """
     Fast path: regex/heuristic extractors only (no LLM).
-    Mirrors `process_single_invoice` steps 1 and bbox normalization.
+    Regex/heuristic extractors only; bbox normalization via `_to_xywh`.
     """
     total_val, total_conf, total_bbox = extract_total(path)
     date_data = extract_invoice_date(ocr_results)

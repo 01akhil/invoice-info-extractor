@@ -15,7 +15,7 @@ from workers.redis.redis_client import get_redis
 from workers.retry.retry_ops import schedule_retry
 from workers.retry.retry_strategy import next_llm_strategy
 from config.logger_setup import get_logger
-from pipeline.validation_layer import validate_extracted_invoice
+from pipeline.validation.validation_layer import validate_extracted_invoice
 from workers.human_review_store import finalize_needs_human_review
 
 logger = get_logger()

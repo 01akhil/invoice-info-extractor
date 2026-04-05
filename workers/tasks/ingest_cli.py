@@ -8,7 +8,7 @@ from pathlib import Path
 from config.settings import IMAGES_DIR
 from config.logger_setup import get_logger
 from workers.db.session import init_db
-from workers.pipelines.ingestion import ingest_folder
+from workers.tasks.ingestion import ingest_folder
 from workers.redis.redis_client import get_redis
 
 logger = get_logger()

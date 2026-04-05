@@ -21,8 +21,8 @@ from workers.redis.redis_client import get_redis
 from workers.retry.retry_ops import schedule_retry
 from workers.retry.retry_strategy import next_llm_strategy
 from config.logger_setup import get_logger
-from pipeline.batch_llm import merge_batch_strategies, run_batch_llm_extraction
-from pipeline.fallback import run_llm_extraction
+from pipeline.llm_batch.batch_llm import merge_batch_strategies, run_batch_llm_extraction
+from pipeline.llm_batch.fallback import run_llm_extraction
 from pipeline.stages import extraction_payload_from_llm_parsed, serializable_to_ocr_results
 
 logger = get_logger()

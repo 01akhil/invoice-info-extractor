@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from llm.gemini_llm import gemini_llm_call
-from pipeline.batch_parser import parse_batch_llm_response
-from pipeline.fallback import ocr_to_text
-from pipeline.prompt_builder import build_batch_prompt
+from pipeline.llm_batch.batch_parser import parse_batch_llm_response
+from pipeline.llm_batch.fallback import ocr_to_text
+from pipeline.llm_batch.prompt_builder import build_batch_prompt
 
 
 def merge_batch_strategies(strategies: list[str]) -> str:
