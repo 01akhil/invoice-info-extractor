@@ -18,7 +18,7 @@ build/
 
 # Runtime / local data
 data/*.db
-results/
+
 
 invoice_submission.log
 

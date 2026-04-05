@@ -82,13 +82,6 @@ SUBMIT_TIMEOUT = float(os.environ.get("SUBMIT_TIMEOUT", "15"))
 # Date field sent to Google: ``iso`` = YYYY-MM-DD (required for Forms "Date" questions; avoids HTTP 400).
 # Use ``dmy`` for DD/MM/YYYY only if the form uses a short-answer text field, not a Date picker.
 SUBMIT_DATE_FORMAT = os.environ.get("SUBMIT_DATE_FORMAT", "iso").strip().lower()
-# After a one-shot pipeline run, POST valid_invoices to the form (set 0 or use --no-submit-form to skip).
-SUBMIT_AFTER_PIPELINE = os.environ.get("SUBMIT_AFTER_PIPELINE", "1").lower() not in (
-    "0",
-    "false",
-    "no",
-    "off",
-)
 
 # --- Evaluation / pipeline artifacts ---
 # When false (default), each pipeline run starts with an empty human_review_queue.json.

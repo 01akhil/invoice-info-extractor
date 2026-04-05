@@ -71,7 +71,6 @@ def _ocr_once(job_id: str) -> None:
         )
 
         r.lpush(Q_POST_OCR, json.dumps({"job_id": job_id}))
-        METRICS.inc("ocr_success")
 
         pl_info(
             "ocr",

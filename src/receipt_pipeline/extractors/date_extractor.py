@@ -44,7 +44,7 @@ def extract_invoice_date(results):
             matches = re.findall(pattern, text_clean)
             for match in matches:
 
-                # ❌ Skip time-like values
+                # Skip time-like values
                 if ":" in match:
                     continue
 
@@ -57,20 +57,20 @@ def extract_invoice_date(results):
 
                 _cx, cy = get_center(bbox)
 
-                # 🔥 SCORING
+                # SCORING
                 score = 0
 
-                # ✅ keyword boost
+                #   keyword boost
                 if "date" in text_lower:
                     score += 50
 
                 if "invoice" in text_lower:
                     score += 20
 
-                # ✅ top preference (dates usually top)
+                # top preference (dates usually top)
                 score += max(0, 100 - cy * 0.5)
 
-                # ✅ confidence boost
+                #   confidence boost
                 score += confidence * 20
 
                 candidates.append({
@@ -81,11 +81,11 @@ def extract_invoice_date(results):
                     "raw_text": text_clean
                 })
 
-    # ❗ No candidate
+    #  No candidate
     if not candidates:
         return None
 
-    # ✅ pick best
+    # pick best
     best = max(candidates, key=lambda x: x["score"])
 
     return {

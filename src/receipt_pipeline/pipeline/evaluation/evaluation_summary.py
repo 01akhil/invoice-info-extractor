@@ -2,7 +2,6 @@
 Writes ``results/evaluation_summary.json`` for the **latest pipeline run** only.
 
 Reads metrics and outcomes from ``pipeline_export.json`` (same run as export).
-Does not write ``evaluation_summary_all.json``, ``pipeline_export_all.*``, or history JSONL.
 """
 
 from __future__ import annotations

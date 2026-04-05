@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "receipt-pipeline"
 version = "0.1.0"
-description = "Batch invoice OCR with Redis workers, rules + Gemini, SQLite jobs, optional Google Forms submit"
+description = "Batch invoice OCR with Redis workers, rules + Gemini, SQLite jobs, Google Forms submit"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,8 +17,6 @@ dependencies = [
     "requests>=2.28.0",
     "redis>=5.0",
     "SQLAlchemy>=2.0",
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.27",
 ]
 
 [tool.setuptools.packages.find]

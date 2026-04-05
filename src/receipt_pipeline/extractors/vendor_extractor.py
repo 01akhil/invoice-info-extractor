@@ -9,11 +9,10 @@ from config.settings import TESSERACT_CMD
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
 TOP_PORTION = 0.21
-CONF_THRESHOLD = 45       # lowered: some receipts have globally lower OCR conf
-MAX_LINES = 8            # FIX 2: was 6; handwritten header eats top lines
+CONF_THRESHOLD = 45       
+MAX_LINES = 8           
 
-# FIX 3: use whole-word / phrase matching only — no bare substrings like "no"
-# Keep these as complete tokens to avoid substring false-positives
+
 NEGATIVE_PHRASES = [
     "tax invoice", "simplified tax invoice", "invoice", "receipt",
     "cash bill", "cash sales",
@@ -24,7 +23,7 @@ NEGATIVE_PHRASES = [
     "taman", "tmn", "bandar", "lot ", "block",
     "johor", "selangor", "kuala lumpur", "shah alam",
     "seri kembangan", "petaling jaya",
-    "tan woon yann", "tan chay yee",   # customer names in this dataset
+    "tan woon yann", "tan chay yee",  
 ]
 
 POSITIVE_WORDS = [
@@ -41,7 +40,6 @@ def normalize(text):
     return unicodedata.normalize("NFKC", text).strip()
 
 def clean_line(text):
-    # keep letters, spaces, & . ' - ( )
     return re.sub(r"[^A-Za-z\s&.\'\-()]", "", text).strip()
 
 def has_digits(text):
@@ -61,7 +59,7 @@ def is_bad_line(text):
     t = text.lower()
     if len(text) < 3:
         return True
-    # FIX 3: check phrase membership, not bare substring on raw tokens like "no"
+    
     if any(phrase in t for phrase in NEGATIVE_PHRASES):
         return True
     if has_digits(text):
@@ -79,15 +77,14 @@ def is_unreliable(conf_list, height_list):
     """Detect handwriting / stamps by OCR confidence and height variance."""
     if not conf_list:
         return True
-    # FIX 4: Tesseract returns int -1, not string '-1'; filter properly
+   
     valid = [c for c in conf_list if isinstance(c, int) and c >= 0]
     if not valid:
         return True
     avg_conf = sum(valid) / len(valid)
     if avg_conf < CONF_THRESHOLD:
         return True
-    # FIX 5: raised variance multiplier from 0.8 → 1.5
-    # Large printed capitals naturally vary in height vs. lowercase descenders
+    
     if len(height_list) > 1:
         avg_h = sum(height_list) / len(height_list)
         if avg_h > 0 and (max(height_list) - min(height_list)) > avg_h * 1.5:
@@ -105,7 +102,7 @@ def extract_vendor(image_path, draw=True):
     h, w = image.shape[:2]
     top_img = image[:int(h * TOP_PORTION), :]
 
-    # LSTM engine + auto page-seg for better accuracy
+  
     cfg = r"--oem 3 --psm 6"
     ocr = pytesseract.image_to_data(top_img, config=cfg, output_type=pytesseract.Output.DICT)
 
@@ -119,13 +116,13 @@ def extract_vendor(image_path, draw=True):
         if not text:
             continue
 
-        # FIX 4: conf is already an int from DICT output; guard against -1 int
+      
         conf = ocr["conf"][i]
         conf = int(conf) if conf != -1 else -1
 
         x, y, bw, bh = ocr["left"][i], ocr["top"][i], ocr["width"][i], ocr["height"][i]
 
-        # FIX 1: raised tolerance from 10 → 15px — same-line words can differ
+       
         if last_y == -1 or abs(y - last_y) < 15:
             cur_txt.append(text); cur_conf.append(conf)
             cur_h.append(bh);     cur_box.append((x, y, bw, bh))
@@ -206,7 +203,7 @@ def extract_vendor(image_path, draw=True):
     if best_score < 80:                 # lowered threshold to match new scoring
         return None, 0.0, None
 
-    # FIX 7: normalize against realistic max score, not arbitrary 180
+  
     max_possible = 120 + 40 + 60 + 50 + 25   # up*120 + pos*40 + len + pos_bonus + top_bonus
     confidence = round(min(1.0, best_score / max_possible), 3)
 

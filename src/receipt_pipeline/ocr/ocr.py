@@ -8,7 +8,6 @@ pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 class CorruptedImageError(Exception):
     pass
 
-
 class OCRReader:
     def read(self, img_path):
         img = cv2.imread(img_path)

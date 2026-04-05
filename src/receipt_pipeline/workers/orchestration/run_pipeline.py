@@ -1,18 +1,13 @@
 """
 Run all pipeline workers: OCR (multiprocessing), post-OCR, LLM pool, validate, retry scheduler.
 
-Usage:
-  python -m receipt_pipeline.workers.run_pipeline
-
-Requires Redis (see REDIS_URL). Initializes SQLite under data/invoices.db (WAL mode for concurrency).
+Used by the orchestrator via ``start_workers``. Requires Redis (see ``REDIS_URL``).
+Initializes SQLite under ``data/invoices.db`` (WAL mode for concurrency).
 """
 
 from __future__ import annotations
 
-import argparse
 import multiprocessing
-import signal
-import sys
 import threading
 import time
 from typing import Callable
@@ -102,39 +97,3 @@ def start_workers(*, run_init_db: bool = True) -> tuple[multiprocessing.Event, t
             p.join(timeout=5)
 
     return stop_mp, stop_threads, ocr_procs, threads, shutdown
-
-
-def main() -> None:
-    from receipt_pipeline.workers.config import LLM_THREAD_POOL, OCR_PROCESSES, POST_OCR_THREADS, VALIDATE_THREADS
-
-    _, _, _, _, shutdown_workers = start_workers(run_init_db=True)
-
-    def _shutdown(*_args) -> None:
-        shutdown_workers()
-        time.sleep(0.2)
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _shutdown)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, _shutdown)
-
-    logger.info(
-        "Pipeline running: OCR processes=%s, LLM pool=%s, post_ocr=%s, validate=%s. Ctrl+C to stop.",
-        OCR_PROCESSES,
-        LLM_THREAD_POOL,
-        POST_OCR_THREADS,
-        VALIDATE_THREADS,
-    )
-
-    try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        _shutdown()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run invoice processing workers.")
-    parser.parse_args()
-    multiprocessing.freeze_support()
-    main()

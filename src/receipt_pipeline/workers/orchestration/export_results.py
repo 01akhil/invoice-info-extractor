@@ -113,6 +113,9 @@ def export_pipeline_results(
 
     metrics_snap = METRICS.snapshot()
     obs = _observability_from_rows(rows)
+    # Same count as observability.terminal_success_with_rule_extraction_only (not raw Tesseract completions).
+    metrics_out = dict(metrics_snap)
+    metrics_out["ocr_success"] = obs["terminal_success_with_rule_extraction_only"]
     payload: dict[str, Any] = {
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "valid_invoices": success,
@@ -127,11 +130,11 @@ def export_pipeline_results(
             "human_review_file": "results/human_review_queue.json",
             "total_jobs_in_export": len(rows),
         },
-        "metrics": metrics_snap,
+        "metrics": metrics_out,
         "metrics_scope": "current_pipeline_run",
         "metrics_interpretation": {
             "scope": "Counters reset at each pipeline start (unless EVAL_KEEP_METRICS=1). Values match this export batch, not prior runs.",
-            "ocr_success": "Successful Tesseract runs (Redis-aggregated across OCR worker processes).",
+            "ocr_success": "Terminal SUCCESS jobs with extraction source OCR_RULE (rules path, no LLM); matches observability.terminal_success_with_rule_extraction_only.",
             "ocr_fail": "OCR stage raised before snapshot stored.",
             "llm_invocations": "Total Gemini API calls (each batch call counts as 1).",
             "llm_batch_calls": "Batch API calls (multiple invoices per request when batching applies).",
@@ -157,7 +160,7 @@ def export_pipeline_results(
         needs_human_review=payload["summary"]["needs_human_review_count"],
         non_terminal=payload["summary"]["non_terminal_count"],
         llm_invocations=metrics_snap.get("llm_invocations"),
-        ocr_success=metrics_snap.get("ocr_success"),
+        ocr_success=metrics_out.get("ocr_success"),
     )
     logger.info("Pipeline export written: %s", out_path)
     return payload

@@ -4,7 +4,7 @@ A batch-oriented system that ingests receipt images from a folder, runs **Tesser
 
 **Yes — the LLM stage often processes several invoices in a single Gemini request.** Workers dequeue up to `LLM_BATCH_MAX` jobs (default 3), wait briefly to fill the batch, build one prompt containing multiple receipts’ OCR text, issue **one** API call, then split the structured response per `job_id`. If batch parsing fails or a job is missing from the model output, the system **falls back to one API call per invoice** so nothing is silently dropped.
 
-The primary entrypoint is [`main.py`](main.py). **Google Forms** submission (optional) posts **`valid_invoices`** (terminal `SUCCESS` rows). Jobs that cannot be automated reliably are routed to **`NEEDS_REVIEW`** and recorded in `results/human_review_queue.json`.
+The primary entrypoint is [`main.py`](main.py): **(1)** run the pipeline on `IMAGES_DIR`, export results, then POST **`valid_invoices`** to the Google Form, or **(2)** **`--submit-only`** to POST from an existing export JSON without processing images. Jobs that cannot be automated reliably are routed to **`NEEDS_REVIEW`** and recorded in `results/human_review_queue.json`.
 
 ---
 
@@ -18,7 +18,7 @@ The primary entrypoint is [`main.py`](main.py). **Google Forms** submission (opt
 | Cost-aware AI | Rules first; Gemini when rule confidences are low or validation requests a stricter LLM pass |
 | Observability | Structured `[pipeline]` logs, Redis-backed counters (`metrics` in export JSON) |
 | Human handoff | Jobs that exhaust retries become `NEEDS_REVIEW` and appear in `results/human_review_queue.json` |
-| Form integration | After each one-shot run, HTTP POST of successes to a Google Form (optional) |
+| Form integration | After each pipeline run, HTTP POST of successes to a Google Form (or submit-only from export) |
 
 ---
 
@@ -31,7 +31,7 @@ The primary entrypoint is [`main.py`](main.py). **Google Forms** submission (opt
 
 ```bash
 pip install -r requirements.txt
-pip install -e .   # recommended: install package so imports and `python -m receipt_pipeline...` work without PYTHONPATH (especially on Windows + multiprocessing)
+pip install -e .   # recommended: install package so imports work without PYTHONPATH (especially on Windows + multiprocessing)
 docker compose up -d
 ```
 
@@ -55,17 +55,14 @@ All tunables live in [`config/settings.py`](config/settings.py) (loaded via `pyt
 python main.py
 ```
 
-This resets Redis metrics (unless `EVAL_KEEP_METRICS=1`), optionally resets `results/human_review_queue.json` (unless `EVAL_ACCUMULATE_HUMAN_REVIEW=1`), starts workers, ingests top-level images under `IMAGES_DIR`, waits for terminal job states, writes `results/pipeline_export.json`, `pipeline_export.csv`, and `evaluation_summary.json`, and **by default** submits `valid_invoices` to the Google Form.
+This resets Redis metrics (unless `EVAL_KEEP_METRICS=1`), optionally resets `results/human_review_queue.json` (unless `EVAL_ACCUMULATE_HUMAN_REVIEW=1`), starts workers, ingests top-level images under `IMAGES_DIR`, waits for terminal job states, writes `results/pipeline_export.json`, `pipeline_export.csv`, and `evaluation_summary.json`, then submits `valid_invoices` to the Google Form.
 
 | Command | Effect |
 |---------|--------|
-| `python main.py` | One-shot: wait, export, submit (if enabled), exit |
-| `python main.py --pipeline-timeout 1200` | Cap wait at 1200 seconds |
-| `python main.py --no-submit-form` | Skip form POST |
-| `python main.py --submit-form` | Force submit if `SUBMIT_AFTER_PIPELINE=0` in `.env` |
-| `python main.py --pipeline-daemon` | Keep workers after ingest (no automatic wait/export in this mode) |
+| `python main.py` | Process images, export, then submit `valid_invoices` to the form |
+| `python main.py --submit-only` | Skip the pipeline; submit from `results/pipeline_export.json` only |
 
-Start Redis first (`docker compose up -d`), then run `python main.py` from the project root.
+Start Redis first (`docker compose up -d`) for the full pipeline (`--submit-only` does not need Redis). Wait duration for jobs is set by `PIPELINE_WAIT_TIMEOUT_SEC` in `.env` / [`config/settings.py`](config/settings.py).
 
 ---
 
@@ -77,6 +74,8 @@ Start Redis first (`docker compose up -d`), then run `python main.py` from the p
 | [`results/pipeline_export.csv`](results/pipeline_export.csv) | Flattened rows |
 | [`results/evaluation_summary.json`](results/evaluation_summary.json) | Run-level outcomes derived from the export |
 | [`results/human_review_queue.json`](results/human_review_queue.json) | Rich detail for `NEEDS_REVIEW` jobs |
+
+The results for 33 invoices have been intentionally included in this repository to facilitate evaluation of the assignment.
 
 ---
 
@@ -97,7 +96,7 @@ The architecture diagram below includes an **idempotent ingest** gate to show th
 
 | Layer | Role |
 |-------|------|
-| **Orchestrator** ([`src/receipt_pipeline/workers/orchestration/orchestrator.py`](src/receipt_pipeline/workers/orchestration/orchestrator.py), [`main.py`](main.py)) | Starts workers, ingests folder, waits for completion, exports JSON/CSV, evaluation summary, optional form submit. |
+| **Orchestrator** ([`src/receipt_pipeline/workers/orchestration/orchestrator.py`](src/receipt_pipeline/workers/orchestration/orchestrator.py), [`main.py`](main.py)) | Starts workers, ingests folder, waits for completion, exports JSON/CSV, evaluation summary, form submit. |
 | **Redis** | List queues (`Q_OCR`, `Q_POST_OCR`, `Q_LLM`, `Q_VALIDATE`) for fan-out work; **sorted set** `RETRY_ZSET` for time-delayed retries. |
 | **SQLite** | Durable `InvoiceJob` records: OCR snapshots, extraction payloads, status, retries, errors. |
 | **OCR** ([`src/receipt_pipeline/workers/core/ocr_worker.py`](src/receipt_pipeline/workers/core/ocr_worker.py), [`src/receipt_pipeline/ocr/ocr.py`](src/receipt_pipeline/ocr/ocr.py)) | Multiprocess Tesseract; writes `ocr_snapshot`. |
@@ -107,7 +106,7 @@ The architecture diagram below includes an **idempotent ingest** gate to show th
 | **Retry scheduler** ([`src/receipt_pipeline/workers/retry/retry_ops.py`](src/receipt_pipeline/workers/retry/retry_ops.py)) | Moves due retries from `RETRY_ZSET` back onto target queues. |
 | **Submit** ([`src/receipt_pipeline/submission/service.py`](src/receipt_pipeline/submission/service.py)) | POST only `valid_invoices` to Google Forms. |
 
-**Data flow (happy path):** image file → ingest (DB row + `Q_OCR`) → OCR (`ocr_snapshot`, `Q_POST_OCR`) → rules (confidences) → either **`Q_VALIDATE`** (fast path) or **`Q_LLM`** → **`Q_VALIDATE`** → `SUCCESS` → export → optional form.
+**Data flow (happy path):** image file → ingest (DB row + `Q_OCR`) → OCR (`ocr_snapshot`, `Q_POST_OCR`) → rules (confidences) → either **`Q_VALIDATE`** (fast path) or **`Q_LLM`** → **`Q_VALIDATE`** → `SUCCESS` → export → form submit.
 
 **Unhappy path:** any stage can increment retries, schedule delayed reprocessing to LLM (or OCR in some failures), or end in **`NEEDS_REVIEW`** with a JSON audit trail.
 
@@ -382,18 +381,8 @@ The integration is **HTTP POST** to Google’s **`formResponse`** endpoint ([`sr
 - **Date field:** normalized for POST using **`SUBMIT_DATE_FORMAT`** (default **`iso`** = `YYYY-MM-DD`). Google’s built-in **Date** question rejects `DD/MM/YYYY` and returns HTTP 400; use `iso` unless the form uses a **short-answer** text field, then set `SUBMIT_DATE_FORMAT=dmy` for `DD/MM/YYYY`.
 - **Hidden fields:** the client **GET**s the viewform page once per batch and sends **`fbzx`** / **`fvv`** with each POST (required by Google; without them you get HTTP 400 “Something went wrong”).
 - **Fields:** `SUBMIT_FORM_URL`, `SUBMIT_ENTRY_VENDOR`, `SUBMIT_ENTRY_DATE`, `SUBMIT_ENTRY_TOTAL`.
-- **Runtime:** `SUBMIT_AFTER_PIPELINE`, `--no-submit-form` / `--submit-form`; manual: `python -m receipt_pipeline.submission`.
+- **Runtime:** full pipeline via `python main.py` (process + submit); submit-only via `python main.py --submit-only`.
 - **Robustness:** browser-like **User-Agent**, treat **2xx** as success, **`SUBMIT_DELAY`** between posts, retries with backoff.
-
----
-
-## Optional tooling
-
-| Item | Description |
-|------|-------------|
-| `python -m receipt_pipeline.workers.run_pipeline` | Workers only (no `main.py` ingest/export) |
-| `python -m receipt_pipeline.workers.orchestration.ingest_cli` | Enqueue images from `IMAGES_DIR` (or `--folder`) without full orchestration |
-| `uvicorn receipt_pipeline.workers.api:app` | Optional API ([`src/receipt_pipeline/workers/api.py`](src/receipt_pipeline/workers/api.py)) |
 
 ---
 
@@ -406,7 +395,7 @@ The integration is **HTTP POST** to Google’s **`formResponse`** endpoint ([`sr
 ├── config/                 # settings, logging (env + dotenv)
 ├── src/receipt_pipeline/
 │   ├── pipeline/           # stages, llm_batch, validation, evaluation
-│   ├── workers/            # orchestration, core workers, Redis, DB, retry, API
+│   ├── workers/            # orchestration, core workers, Redis, DB, retry
 │   ├── ocr/
 │   ├── llm/
 │   ├── extractors/

@@ -1,0 +1,75 @@
+{
+  "generated_at": "2026-04-05T14:42:03.162294+00:00",
+  "latest_run": true,
+  "evaluation_run": {
+    "receipt_count": 33,
+    "export_json": "C:\\Users\\Acer\\Desktop\\emmaRobot\\results\\pipeline_export.json",
+    "export_csv": "C:\\Users\\Acer\\Desktop\\emmaRobot\\results\\pipeline_export.csv",
+    "images_dir": "C:\\Users\\Acer\\Desktop\\emmaRobot\\images",
+    "image_files": [
+      "X00016469670.jpg",
+      "X51005230657.jpg",
+      "X51005444033.jpg",
+      "X51005605295.jpg",
+      "X51005605332.jpg",
+      "X51005705729.jpg",
+      "X51005705784.jpg",
+      "X51005719889.jpg",
+      "X51005719905.jpg",
+      "X51005763940.jpg",
+      "X51005806685.jpg",
+      "X51005806702.jpg",
+      "X51006401723.jpg",
+      "X51006619772.jpg",
+      "X51006828201.jpg",
+      "X51006913054.jpg",
+      "X51007225398.jpg",
+      "X51007225399.jpg",
+      "X51007225406.jpg",
+      "X51007228448.jpg",
+      "X51007231338.jpg",
+      "X51007262315.jpg",
+      "X51007262328.jpg",
+      "X51007262330.jpg",
+      "X51007339094.jpg",
+      "X51007391390.jpg",
+      "X51007846288.jpg",
+      "X51007846358.jpg",
+      "X51007846400.jpg",
+      "X51007846403.jpg",
+      "X51008099071.jpg",
+      "X51008142061.jpg",
+      "X51008145450.jpg"
+    ],
+    "data_source": "main_pipeline"
+  },
+  "outcomes": {
+    "success": 33,
+    "needs_human_review": 0,
+    "legacy_dlq": 0,
+    "non_terminal_stuck": 0,
+    "failed_or_incomplete": 0
+  },
+  "metrics": {
+    "success_total": 33,
+    "llm_fallback_routed": 12,
+    "llm_batch_calls": 5,
+    "llm_invocations": 5,
+    "ocr_success": 21
+  },
+  "metrics_note": "Metrics are for the current pipeline run only (Redis reset each run unless EVAL_KEEP_METRICS=1).",
+  "observability_db": {
+    "jobs_with_ocr_snapshot": 33,
+    "terminal_success_with_rule_extraction_only": 21,
+    "jobs_with_llm_sourced_extraction": 12,
+    "source_histogram": {
+      "OCR_RULE": 21,
+      "LLM": 12
+    }
+  },
+  "common_failure_modes": {},
+  "notes": [
+    "Derived from pipeline_export.json for this run.",
+    "Human-review items are listed in results/human_review_queue.json, not in valid_invoices."
+  ]
+}

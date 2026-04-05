@@ -9,7 +9,6 @@ from config.settings import (
     REDIS_URL,
     RESULTS_DIR,
     RESULTS_UPLOAD_DIR,
-    SUBMIT_AFTER_PIPELINE,
     SUBMIT_FORM_URL,
     TESSERACT_CMD,
 )
@@ -23,7 +22,6 @@ __all__ = [
     "REDIS_URL",
     "RESULTS_DIR",
     "RESULTS_UPLOAD_DIR",
-    "SUBMIT_AFTER_PIPELINE",
     "SUBMIT_FORM_URL",
     "TESSERACT_CMD",
 ]

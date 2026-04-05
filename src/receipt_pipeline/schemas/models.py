@@ -1,9 +1,7 @@
 """Pydantic domain model — validation rules only (SRP)."""
 
 from __future__ import annotations
-
 from datetime import date, datetime
-
 from pydantic import BaseModel, Field, field_validator
 
 

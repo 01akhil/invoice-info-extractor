@@ -14,33 +14,6 @@ from receipt_pipeline.workers.db.session import SessionLocal
 from receipt_pipeline.workers.utils.pipeline_log import pl_info, pl_warning
 
 
-# def ingest_image(r: redis.Redis, image_path: str, job_id: str | None = None) -> str:
-#     """
-#     Create DB row (PENDING) and push to OCR queue.
-#     Idempotent: if job_id already exists, returns existing id without duplicate enqueue.
-#     """
-#     path = str(Path(image_path).resolve())
-#     jid = job_id or str(uuid.uuid4())
-#     session = SessionLocal()
-#     try:
-#         existing = get_job(session, jid)
-#         if existing:
-#             pl_info("ingest", "skip_duplicate_job", job_id=jid, reason="already_in_db")
-#             return jid
-#         create_job(session, jid, path, max_retries=PIPELINE_MAX_FAILURES_BEFORE_REVIEW)
-#         r.lpush(Q_OCR, json.dumps({"job_id": jid}))
-#         pl_info(
-#             "ingest",
-#             "job_created",
-#             job_id=jid,
-#             image=path,
-#             next_queue=Q_OCR,
-#             decision="enqueue_OCR",
-#         )
-#         return jid
-#     finally:
-#         session.close()
-
 def ingest_image(r, image_path: str, job_id: str | None = None) -> str:
     """
     Create DB row (PENDING) and push to OCR queue.
@@ -66,7 +39,7 @@ def ingest_image(r, image_path: str, job_id: str | None = None) -> str:
         existing = get_job(session, jid)
 
         if existing:
-            # ✅ Ensure job is not lost (re-enqueue if still pending)
+            #   Ensure job is not lost (re-enqueue if still pending)
             if existing.status == "PENDING":
                 r.lpush(Q_OCR, json.dumps({"job_id": jid}))
                 pl_info("ingest", "re_enqueue_pending_job", job_id=jid)
@@ -79,10 +52,10 @@ def ingest_image(r, image_path: str, job_id: str | None = None) -> str:
                 )
             return jid
 
-        # ✅ Create new job
+        #   Create new job
         create_job(session, jid, path, max_retries=PIPELINE_MAX_FAILURES_BEFORE_REVIEW)
 
-        # ✅ Enqueue
+        #   Enqueue
         r.lpush(Q_OCR, json.dumps({"job_id": jid}))
 
         pl_info(
