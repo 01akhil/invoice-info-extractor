@@ -198,45 +198,45 @@ Each image becomes one **`InvoiceJob`** (`job_id`). State is stored in SQLite; *
 ### Architecture diagram (with idempotent ingest)
 
 ```mermaid
-flowchart TB
-  subgraph ingest [1. Ingest]
+graph TB
+  subgraph s1[1 - Ingest]
     F[images]
-    F --> DUP{job_id already in SQLite?}
-    DUP -->|yes| SKIP[Skip enqueue — idempotent]
-    DUP -->|no| ID[job_id row PENDING]
+    F --> DUP{job_id in SQLite?}
+    DUP -->|yes| SKIP[Skip enqueue idempotent]
+    DUP -->|no| ID[job_id PENDING]
     ID --> QO[Q_OCR]
   end
 
-  subgraph ocr [2. OCR workers]
+  subgraph s2[2 - OCR workers]
     QO --> TESS[Tesseract]
-    TESS --> DB1[(ocr_snapshot OCR_DONE)]
+    TESS --> DB1[ocr_snapshot OCR_DONE]
     DB1 --> QP[Q_POST_OCR]
   end
 
-  subgraph rules [3. Post-OCR rules]
+  subgraph s3[3 - Post-OCR rules]
     QP --> R{Confidences OK?}
     R -->|yes| QV[Q_VALIDATE]
     R -->|no| QL[Q_LLM]
   end
 
-  subgraph llm [4. LLM worker]
-    QL --> COL[Collect batch up to LLM_BATCH_MAX]
+  subgraph s4[4 - LLM worker]
+    QL --> COL[Collect batch LLM_BATCH_MAX]
     COL --> GEM{One Gemini call}
-    GEM -->|parsed per job_id| QV
-    GEM -->|parse fail / missing id| ONE[Single-job Gemini]
+    GEM -->|per job_id| QV
+    GEM -->|fallback| ONE[Single-job Gemini]
     ONE --> QV
   end
 
-  subgraph val [5. Validate]
-    QV --> V{validate_extracted_invoice}
+  subgraph s5[5 - Validate]
+    QV --> V{validate invoice}
     V -->|ok| OK[SUCCESS]
-    V -->|fail| RETRY[schedule_retry → RETRY_ZSET → later Q_LLM]
+    V -->|fail| RETRY[retry to RETRY_ZSET then Q_LLM]
     RETRY --> COL
-    V -->|max retries| HR[NEEDS_REVIEW + human_review_queue.json]
+    V -->|max retries| HR[NEEDS_REVIEW]
   end
 
-  subgraph sched [Retry scheduler]
-    Z[RETRY_ZSET backoff] --> QL
+  subgraph s6[Retry scheduler]
+    Z[RETRY_ZSET] --> QL
   end
 ```
 
@@ -428,14 +428,13 @@ Logs: [`logs/app.log`](logs/app.log).
 
 ## Improvements (with more time)
 
+- **Interface for human review queue:** Interface to validate the human review queue and submitting the data.
 - **Observability:** OpenTelemetry, JSON logs, Prometheus scrape of Redis metrics.
 - **Testing:** Golden OCR fixtures, contract tests on exports, mocked LLM.
-- **Idempotent submission:** Track submitted `job_id` to avoid duplicate form posts on re-runs.
-- **OCR:** Optional second engine for low-confidence pages; A/B tune thresholds on a labeled set.
+- **OCR:** Optional second engine for low-confidence pages.
 - **Forms:** Official Google APIs or Apps Script if OAuth / ownership policies require it.
-- **SDK migration:** `google.genai` when migrating off deprecated `google.generativeai` patterns.
 - **Deployment:** Container images, separate LLM worker tier, DLQ review UI.
-
+- **Caching:** Avoid reprocessing same invoice.Hash image and reuse results.
 ---
 
 ## License / evaluation
