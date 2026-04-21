@@ -1,12 +1,15 @@
 {
-  "generated_at": "2026-04-05T14:42:03.162294+00:00",
+  "generated_at": "2026-04-21T07:51:17.946651+00:00",
   "latest_run": true,
   "evaluation_run": {
-    "receipt_count": 33,
-    "export_json": "C:\\Users\\Acer\\Desktop\\emmaRobot\\results\\pipeline_export.json",
-    "export_csv": "C:\\Users\\Acer\\Desktop\\emmaRobot\\results\\pipeline_export.csv",
-    "images_dir": "C:\\Users\\Acer\\Desktop\\emmaRobot\\images",
+    "receipt_count": 36,
+    "export_json": "E:\\emma\\emmaRobot\\results\\pipeline_export.json",
+    "export_csv": "E:\\emma\\emmaRobot\\results\\pipeline_export.csv",
+    "images_dir": "E:\\emma\\emmaRobot\\images",
     "image_files": [
+      "imaage2.jpg",
+      "image1.jpg",
+      "image3.jpg",
       "X00016469670.jpg",
       "X51005230657.jpg",
       "X51005444033.jpg",
@@ -44,30 +47,34 @@
     "data_source": "main_pipeline"
   },
   "outcomes": {
-    "success": 33,
-    "needs_human_review": 0,
+    "success": 35,
+    "needs_human_review": 1,
     "legacy_dlq": 0,
     "non_terminal_stuck": 0,
-    "failed_or_incomplete": 0
+    "failed_or_incomplete": 1
   },
   "metrics": {
-    "success_total": 33,
+    "llm_batch_calls": 6,
+    "ocr_no_text_regions": 1,
     "llm_fallback_routed": 12,
-    "llm_batch_calls": 5,
-    "llm_invocations": 5,
-    "ocr_success": 21
+    "success_total": 35,
+    "llm_invocations": 6,
+    "ocr_success": 23
   },
   "metrics_note": "Metrics are for the current pipeline run only (Redis reset each run unless EVAL_KEEP_METRICS=1).",
   "observability_db": {
-    "jobs_with_ocr_snapshot": 33,
-    "terminal_success_with_rule_extraction_only": 21,
+    "jobs_with_ocr_snapshot": 35,
+    "terminal_success_with_rule_extraction_only": 23,
     "jobs_with_llm_sourced_extraction": 12,
     "source_histogram": {
-      "OCR_RULE": 21,
-      "LLM": 12
+      "OCR_RULE": 23,
+      "LLM": 12,
+      "unset": 1
     }
   },
-  "common_failure_modes": {},
+  "common_failure_modes": {
+    "ocr_no_text_regions": 1
+  },
   "notes": [
     "Derived from pipeline_export.json for this run.",
     "Human-review items are listed in results/human_review_queue.json, not in valid_invoices."

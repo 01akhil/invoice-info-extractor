@@ -12,18 +12,23 @@ from receipt_pipeline.workers.config import (
     Q_LLM,
     Q_VALIDATE,
 )
-from receipt_pipeline.workers.db.crud import append_retry_history, get_job, increment_retry, update_job
-from receipt_pipeline.workers.db.models import JobStatus
-from receipt_pipeline.workers.db.session import SessionLocal
+from receipt_pipeline.db.crud import append_retry_history, get_job, increment_retry, update_job
+from receipt_pipeline.db.models import JobStatus
+from receipt_pipeline.db.session import SessionLocal
 from receipt_pipeline.workers.utils.metrics import METRICS
 from receipt_pipeline.workers.utils.pipeline_log import pl_info, pl_warning
-from receipt_pipeline.workers.redis.redis_client import get_redis
+from receipt_pipeline.redis_queue import get_redis
 from receipt_pipeline.workers.retry.retry_ops import schedule_retry
 from receipt_pipeline.workers.retry.retry_strategy import next_llm_strategy
 from config.logger_setup import get_logger
 from receipt_pipeline.pipeline.llm_batch.batch_llm import merge_batch_strategies, run_batch_llm_extraction
 from receipt_pipeline.pipeline.llm_batch.fallback import run_llm_extraction
-from receipt_pipeline.pipeline.stages import extraction_payload_from_llm_parsed, serializable_to_ocr_results
+from receipt_pipeline.pipeline.stages import (
+    extraction_payload_from_llm_parsed,
+    ocr_snapshot_has_regions,
+    serializable_to_ocr_results,
+)
+from receipt_pipeline.workers.human_review_store import finalize_needs_human_review
 
 logger = get_logger()
 
@@ -51,8 +56,26 @@ def _execute_single_llm(job_id: str, strategy: str) -> None:
     session = SessionLocal()
     try:
         job = get_job(session, job_id)
-        if not job or not job.ocr_snapshot:
-            pl_warning("llm", "missing_job_or_ocr_snapshot", job_id=job_id)
+        if not job:
+            pl_warning("llm", "missing_job", job_id=job_id)
+            return
+        if job.ocr_snapshot is None:
+            pl_warning("llm", "missing_ocr_snapshot", job_id=job_id)
+            return
+        if not ocr_snapshot_has_regions(job.ocr_snapshot):
+            METRICS.inc("ocr_no_text_regions")
+            finalize_needs_human_review(
+                session,
+                job_id,
+                stage="ocr",
+                reason="ocr_no_text_regions",
+            )
+            pl_info(
+                "llm",
+                "skip_empty_ocr_finalized_review",
+                job_id=job_id,
+                decision="NEEDS_REVIEW",
+            )
             return
 
         pl_info(
@@ -113,8 +136,6 @@ def _handle_single_parse_failure(r, session, job_id: str, strategy: str, raw: st
     append_retry_history(session, job_id, {"stage": "llm", "error": "empty_parse", "strategy": strategy})
     row = increment_retry(session, job_id)
     if row and row.retry_count >= row.max_retries:
-        from receipt_pipeline.workers.human_review_store import finalize_needs_human_review
-
         METRICS.inc("dlq_entries")
         finalize_needs_human_review(
             session,
@@ -157,8 +178,6 @@ def _handle_single_exception(r, session, job_id: str, strategy: str, e: BaseExce
         append_retry_history(session, job_id, {"stage": "llm", "error": str(e), "strategy": strategy})
         row = increment_retry(session, job_id)
         if row and row.retry_count >= row.max_retries:
-            from receipt_pipeline.workers.human_review_store import finalize_needs_human_review
-
             METRICS.inc("dlq_entries")
             finalize_needs_human_review(
                 session,
@@ -208,8 +227,26 @@ def _llm_batch_once(messages: list[dict]) -> None:
             jid = m["job_id"]
             st = m.get("strategy", "default")
             job = get_job(session, jid)
-            if not job or not job.ocr_snapshot:
+            if not job:
                 pl_warning("llm", "batch_skip_missing_job", job_id=jid)
+                continue
+            if job.ocr_snapshot is None:
+                pl_warning("llm", "batch_skip_missing_ocr_snapshot", job_id=jid)
+                continue
+            if not ocr_snapshot_has_regions(job.ocr_snapshot):
+                METRICS.inc("ocr_no_text_regions")
+                finalize_needs_human_review(
+                    session,
+                    jid,
+                    stage="ocr",
+                    reason="ocr_no_text_regions",
+                )
+                pl_info(
+                    "llm",
+                    "batch_skip_empty_ocr_finalized_review",
+                    job_id=jid,
+                    decision="NEEDS_REVIEW",
+                )
                 continue
             loaded.append((job, st))
 

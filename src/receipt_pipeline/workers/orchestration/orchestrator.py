@@ -4,8 +4,8 @@ import time
 from config.logger_setup import get_logger
 from config.settings import IMAGES_DIR, RESULTS_DIR, EVAL_ACCUMULATE_HUMAN_REVIEW
 from receipt_pipeline.workers.utils.pipeline_utils import list_image_files, reset_human_review_queue
-from receipt_pipeline.workers.orchestration.run_pipeline import start_workers
-from receipt_pipeline.workers.redis.redis_client import get_redis
+from receipt_pipeline.redis_queue import get_redis
+from receipt_pipeline.workers.orchestration.worker_startup import start_workers
 from receipt_pipeline.workers.utils.pipeline_log import pl_info
 from receipt_pipeline.workers.utils.metrics import reset_redis_metrics
 
@@ -13,9 +13,9 @@ logger = get_logger()
 _PIPELINE_EXPORT = RESULTS_DIR / "pipeline_export.json"
 
 def run_pipeline(*, wait_timeout_sec: float) -> None:
-    from receipt_pipeline.workers.orchestration.export_results import export_pipeline_results
+    from receipt_pipeline.workers.orchestration.export import export_pipeline_results
     from receipt_pipeline.workers.orchestration.ingestion import ingest_folder
-    from receipt_pipeline.workers.orchestration.job_wait import wait_for_terminal_jobs
+    from receipt_pipeline.workers.orchestration.terminal_jobs import wait_for_terminal_jobs
     from receipt_pipeline.workers.human_review_store import HUMAN_REVIEW_QUEUE_PATH
 
     # Reset metrics

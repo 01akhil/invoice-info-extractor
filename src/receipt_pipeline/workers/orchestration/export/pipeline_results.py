@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,72 +9,16 @@ from typing import Any
 
 from sqlalchemy import select
 
-from receipt_pipeline.workers.db.models import ExtractionSource, InvoiceJob, JobStatus
-from receipt_pipeline.workers.db.session import SessionLocal
+from receipt_pipeline.db.models import InvoiceJob, JobStatus
+from receipt_pipeline.db.session import SessionLocal
+from receipt_pipeline.workers.orchestration.export.invoice_row_dict import invoice_row_to_flat_dict
+from receipt_pipeline.workers.orchestration.export.observability import observability_from_invoice_jobs
+from receipt_pipeline.workers.orchestration.export.write_csv import write_flat_dict_rows_csv
 from receipt_pipeline.workers.utils.metrics import METRICS
 from receipt_pipeline.workers.utils.pipeline_log import pl_info
 from config.logger_setup import get_logger
 
 logger = get_logger()
-
-
-def fetch_jobs_by_ids(job_ids: list[str]) -> list[InvoiceJob]:
-    if not job_ids:
-        return []
-    session = SessionLocal()
-    try:
-        stmt = select(InvoiceJob).where(InvoiceJob.job_id.in_(job_ids))
-        return list(session.scalars(stmt).all())
-    finally:
-        session.close()
-
-
-def _row_to_dict(r: InvoiceJob) -> dict[str, Any]:
-    return {
-        "job_id": r.job_id,
-        "file": r.image_path,
-        "vendor": r.vendor,
-        "date": r.invoice_date,
-        "total": r.total_amount,
-        "confidence": r.confidence,
-        "source": r.source,
-        "status": r.status,
-        "retry_count": r.retry_count,
-        "last_error": r.last_error,
-    }
-
-
-def _observability_from_rows(rows: list[InvoiceJob]) -> dict[str, Any]:
-    """DB-derived stats for OCR vs rule vs LLM paths (per-job truth)."""
-    ocr_done = sum(1 for r in rows if r.ocr_snapshot)
-    by_source: dict[str, int] = {}
-    for r in rows:
-        s = r.source or "unset"
-        by_source[s] = by_source.get(s, 0) + 1
-    llm_sources = {ExtractionSource.OCR_LLM.value, ExtractionSource.LLM.value}
-    rule_only_success = sum(
-        1
-        for r in rows
-        if r.status == JobStatus.SUCCESS.value and (r.source == ExtractionSource.OCR_RULE.value)
-    )
-    llm_sourced = sum(1 for r in rows if r.source in llm_sources)
-    return {
-        "jobs_with_ocr_snapshot": ocr_done,
-        "terminal_success_with_rule_extraction_only": rule_only_success,
-        "jobs_with_llm_sourced_extraction": llm_sourced,
-        "source_histogram": by_source,
-    }
-
-
-def _write_csv(path: Path, flat_rows: list[dict[str, Any]]) -> None:
-    if not flat_rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    keys = list(flat_rows[0].keys())
-    with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=keys)
-        w.writeheader()
-        w.writerows(flat_rows)
 
 
 def export_pipeline_results(
@@ -97,11 +40,11 @@ def export_pipeline_results(
     finally:
         session.close()
 
-    success = [_row_to_dict(r) for r in rows if r.status == JobStatus.SUCCESS.value]
-    needs_review = [_row_to_dict(r) for r in rows if r.status == JobStatus.NEEDS_REVIEW.value]
-    legacy_dlq = [_row_to_dict(r) for r in rows if r.status == JobStatus.DLQ.value]
+    success = [invoice_row_to_flat_dict(r) for r in rows if r.status == JobStatus.SUCCESS.value]
+    needs_review = [invoice_row_to_flat_dict(r) for r in rows if r.status == JobStatus.NEEDS_REVIEW.value]
+    legacy_dlq = [invoice_row_to_flat_dict(r) for r in rows if r.status == JobStatus.DLQ.value]
     other = [
-        _row_to_dict(r)
+        invoice_row_to_flat_dict(r)
         for r in rows
         if r.status
         not in (
@@ -112,8 +55,7 @@ def export_pipeline_results(
     ]
 
     metrics_snap = METRICS.snapshot()
-    obs = _observability_from_rows(rows)
-    # Same count as observability.terminal_success_with_rule_extraction_only (not raw Tesseract completions).
+    obs = observability_from_invoice_jobs(rows)
     metrics_out = dict(metrics_snap)
     metrics_out["ocr_success"] = obs["terminal_success_with_rule_extraction_only"]
     payload: dict[str, Any] = {
@@ -140,7 +82,6 @@ def export_pipeline_results(
             "llm_batch_calls": "Batch API calls (multiple invoices per request when batching applies).",
             "llm_single_calls": "Single-invoice Gemini API calls (fallback or batch item recovery).",
             "llm_fallback_routed": "Jobs routed to LLM after rules due to low confidence.",
-            # "validation_fail": "Validation rejections (may schedule LLM retry).",
             "retry_scheduled": "Backoff retries scheduled onto the retry ZSET.",
             "success_total": "Jobs marked SUCCESS after validation.",
         },
@@ -150,7 +91,7 @@ def export_pipeline_results(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     csv_path = out_path.with_suffix(".csv")
-    _write_csv(csv_path, [_row_to_dict(r) for r in rows])
+    write_flat_dict_rows_csv(csv_path, [invoice_row_to_flat_dict(r) for r in rows])
     pl_info("orchestrator", "export_csv_written", path=str(csv_path), rows=len(rows))
     pl_info(
         "orchestrator",
@@ -164,6 +105,3 @@ def export_pipeline_results(
     )
     logger.info("Pipeline export written: %s", out_path)
     return payload
-
-
-

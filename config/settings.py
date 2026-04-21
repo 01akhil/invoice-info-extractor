@@ -58,7 +58,7 @@ VALIDATE_THREADS = int(os.environ.get("VALIDATE_THREADS", "2"))
 RETRY_POLL_SEC = float(os.environ.get("RETRY_POLL_SEC", "0.5"))
 
 RETRY_BASE_SEC = float(os.environ.get("RETRY_BASE_SEC", "5.0"))
-RETRY_CAP_SEC = float(os.environ.get("RETRY_CAP_SEC", "900.0"))
+RETRY_CAP_SEC = float(os.environ.get("RETRY_CAP_SEC", "10.0"))
 
 PIPELINE_WAIT_TIMEOUT_SEC = float(os.environ.get("PIPELINE_WAIT_TIMEOUT_SEC", "3600"))
 PIPELINE_MAX_FAILURES_BEFORE_REVIEW = int(os.environ.get("PIPELINE_MAX_FAILURES_BEFORE_REVIEW", "2"))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from receipt_pipeline.redis_queue.client import get_redis
 from receipt_pipeline.workers.config import REDIS_URL
 
 
@@ -12,8 +13,6 @@ def ensure_redis(*, timeout_sec: float = 30.0, poll_sec: float = 0.5) -> None:
     Block until `PING` succeeds or timeout.
     Raises RuntimeError with actionable hint if Redis is unavailable.
     """
-    from receipt_pipeline.workers.redis.redis_client import get_redis
-
     deadline = time.monotonic() + timeout_sec
     last: Exception | None = None
     while time.monotonic() < deadline:

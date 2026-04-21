@@ -11,6 +11,7 @@ class InvoiceValidation(BaseModel):
     date: date
     total: float = Field(..., ge=0)
 
+
     @field_validator("date", mode="before")
     @classmethod
     def parse_date(cls, v):

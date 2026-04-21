@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from receipt_pipeline.workers.db.models import ExtractionSource, HumanCorrection, InvoiceJob, JobStatus
+from receipt_pipeline.db.models import ExtractionSource, HumanCorrection, InvoiceJob, JobStatus
 
 
 def get_job(session: Session, job_id: str) -> InvoiceJob | None:

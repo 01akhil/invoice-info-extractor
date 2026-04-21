@@ -40,6 +40,22 @@ def aggregate_ocr_confidence(ocr_results: list) -> float:
     return sum(confs) / len(confs)
 
 
+def ocr_snapshot_has_regions(snapshot: list | dict | None) -> bool:
+    """
+    True if OCR persisted at least one text region after Tesseract.
+
+    ``None`` means the snapshot was never written (OCR not finished).
+    ``[]`` means OCR ran but returned zero regions — distinguish from missing.
+    """
+    if snapshot is None:
+        return False
+    if isinstance(snapshot, list):
+        return len(snapshot) > 0
+    if isinstance(snapshot, dict):
+        return len(snapshot) > 0
+    return False
+
+
 def ocr_results_to_serializable(ocr_results: list) -> list:
     """Serialize OCR tuples for JSON/SQLite storage."""
     out = []
@@ -73,7 +89,7 @@ def run_rule_extraction(path: str, ocr_results: list) -> dict[str, Any]:
     Regex/heuristic extractors only; bbox normalization via `_to_xywh`.
     """
     total_val, total_conf, total_bbox = extract_total(path)
-    date_data = extract_invoice_date(ocr_results)
+    date_data = extract_invoice_date(ocr_results, image_path=path)
     date_val = date_data["date"] if date_data else None
     date_bbox = date_data["bbox"] if date_data else None
     date_conf = date_data["confidence"] if date_data else 0.0

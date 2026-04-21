@@ -1,7 +1,7 @@
 """
-Run all pipeline workers: OCR (multiprocessing), post-OCR, LLM pool, validate, retry scheduler.
+Start all pipeline workers: OCR (multiprocessing), post-OCR, LLM pool, validate, retry scheduler.
 
-Used by the orchestrator via ``start_workers``. Requires Redis (see ``REDIS_URL``).
+Used by the orchestrator. Requires Redis (see ``REDIS_URL``).
 Initializes SQLite under ``data/invoices.db`` (WAL mode for concurrency).
 """
 
@@ -9,41 +9,24 @@ from __future__ import annotations
 
 import multiprocessing
 import threading
-import time
 from typing import Callable
 
 from config.logger_setup import get_logger
+from receipt_pipeline.workers.orchestration.worker_startup.ocr_process_entry import ocr_process_entry
+from receipt_pipeline.workers.orchestration.worker_startup.retry_scheduler_thread_entry import retry_scheduler_thread_entry
 from receipt_pipeline.workers.utils.pipeline_log import pl_info
 
 logger = get_logger()
 
 
-def _ocr_entry(stop_event, worker_id: int) -> None:
-    from receipt_pipeline.workers.core.ocr_worker import ocr_worker_loop
-
-    ocr_worker_loop(stop_event, worker_id)
-
-
-def _retry_entry(stop_event: threading.Event) -> None:
-    from receipt_pipeline.workers.redis.redis_client import get_redis
-    from receipt_pipeline.workers.retry.retry_ops import retry_scheduler_loop
-
-    r = get_redis()
-    pl_info("retry", "scheduler_ready", poll_sec="see RETRY_POLL_SEC", moves_due_jobs_back_to_queues=True)
-    retry_scheduler_loop(r, stop_event, logger)
-
-
 def start_workers(*, run_init_db: bool = True) -> tuple[multiprocessing.Event, threading.Event, list, list, Callable[[], None]]:
-    """
-    Start OCR processes and I/O worker threads. Returns stop events, handles, and shutdown().
-    """
+    """Start OCR processes and I/O worker threads. Returns stop events, handles, and shutdown()."""
+    from receipt_pipeline.db.session import init_db
+    from receipt_pipeline.redis_queue import ensure_redis
     from receipt_pipeline.workers.config import LLM_THREAD_POOL, OCR_PROCESSES, POST_OCR_THREADS, VALIDATE_THREADS
-    from receipt_pipeline.workers.db.session import init_db
     from receipt_pipeline.workers.core.llm_worker import llm_worker_loop
     from receipt_pipeline.workers.core.post_ocr_worker import post_ocr_worker_loop
     from receipt_pipeline.workers.core.validate_worker import validate_worker_loop
-
-    from receipt_pipeline.workers.redis.redis_health import ensure_redis
 
     ensure_redis()
     if run_init_db:
@@ -63,7 +46,7 @@ def start_workers(*, run_init_db: bool = True) -> tuple[multiprocessing.Event, t
 
     ocr_procs: list[multiprocessing.Process] = []
     for i in range(OCR_PROCESSES):
-        p = multiprocessing.Process(target=_ocr_entry, args=(stop_mp, i), name=f"ocr-{i}", daemon=True)
+        p = multiprocessing.Process(target=ocr_process_entry, args=(stop_mp, i), name=f"ocr-{i}", daemon=True)
         p.start()
         ocr_procs.append(p)
 
@@ -85,7 +68,7 @@ def start_workers(*, run_init_db: bool = True) -> tuple[multiprocessing.Event, t
         t.start()
         threads.append(t)
 
-    t_retry = threading.Thread(target=_retry_entry, args=(stop_threads,), name="retry-scheduler", daemon=True)
+    t_retry = threading.Thread(target=retry_scheduler_thread_entry, args=(stop_threads,), name="retry-scheduler", daemon=True)
     t_retry.start()
     threads.append(t_retry)
 

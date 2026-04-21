@@ -56,7 +56,7 @@ def get_engine():
 
 def init_db() -> None:
     # Importing Base loads models.py and registers all tables on Base.metadata.
-    from receipt_pipeline.workers.db.models import Base
+    from receipt_pipeline.db.models import Base
 
     DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)

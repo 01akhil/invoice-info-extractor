@@ -15,7 +15,7 @@ _REDIS_PREFIX = "pipeline:metric:"
 # 🔹 Increment metric in Redis
 def _redis_incr(name: str, n: int = 1) -> None:
     try:
-        from receipt_pipeline.workers.redis.redis_client import get_redis
+        from receipt_pipeline.redis_queue import get_redis
 
         r = get_redis()
         r.incrby(f"{_REDIS_PREFIX}{name}", n)
@@ -27,7 +27,7 @@ def _redis_incr(name: str, n: int = 1) -> None:
 def redis_metrics_snapshot() -> dict[str, int]:
     """Aggregated counters from Redis (true global counts)."""
     try:
-        from receipt_pipeline.workers.redis.redis_client import get_redis
+        from receipt_pipeline.redis_queue import get_redis
 
         r = get_redis()
         out: dict[str, int] = {}
@@ -49,7 +49,7 @@ def redis_metrics_snapshot() -> dict[str, int]:
 def reset_redis_metrics() -> None:
     """Clear all Redis metric keys."""
     try:
-        from receipt_pipeline.workers.redis.redis_client import get_redis
+        from receipt_pipeline.redis_queue import get_redis
 
         r = get_redis()
         keys = list(r.scan_iter(f"{_REDIS_PREFIX}*", count=100))

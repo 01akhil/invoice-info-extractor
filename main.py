@@ -14,8 +14,6 @@ from config.settings import PIPELINE_WAIT_TIMEOUT_SEC, RESULTS_DIR
 from receipt_pipeline.workers.orchestration.orchestrator import run_pipeline
 
 _DEFAULT_EXPORT = RESULTS_DIR / "pipeline_export.json"
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Invoice OCR pipeline: process images and submit to Google Form, or submit-only from export JSON.",

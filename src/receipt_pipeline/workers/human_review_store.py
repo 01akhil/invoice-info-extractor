@@ -10,8 +10,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from config.settings import RESULTS_DIR
-from receipt_pipeline.workers.db.crud import get_job, update_job
-from receipt_pipeline.workers.db.models import InvoiceJob, JobStatus
+from receipt_pipeline.db.crud import get_job, update_job
+from receipt_pipeline.db.models import InvoiceJob, JobStatus
 from config.logger_setup import get_logger
 
 logger = get_logger()

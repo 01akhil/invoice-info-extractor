@@ -39,6 +39,25 @@ POSITIVE_WORDS = [
 def normalize(text):
     return unicodedata.normalize("NFKC", text).strip()
 
+
+def sanitize_vendor_name(name: str) -> str:
+    """
+    Strip company-registration fragments and OCR glue often merged into the vendor line,
+    e.g. ``PRINT EXPERT SDN BHD (-A) E`` → ``PRINT EXPERT SDN BHD``.
+    """
+    s = normalize(name)
+    if not s:
+        return s
+    # Malaysian / common: ``(989625-A)``, ``(123456-X)`` on same line as name
+    s = re.sub(r"\s*\(\s*[0-9][0-9A-Za-z\-/]*\s*\)", "", s)
+    # Leftover ``(-A)`` after digits were stripped by clean_line
+    s = re.sub(r"\s*\(\s*-\s*[A-Z]\s*\)", "", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip()
+    # Trailing single letter (OCR drop from next line, e.g. after ``... BHD``)
+    if re.search(r"\b(?:BHD|SDN|LTD)\b", s, re.I):
+        s = re.sub(r"\s+[A-Z]\s*$", "", s)
+    return s.strip()
+
 def clean_line(text):
     return re.sub(r"[^A-Za-z\s&.\'\-()]", "", text).strip()
 
@@ -203,7 +222,8 @@ def extract_vendor(image_path, draw=True):
     if best_score < 80:                 # lowered threshold to match new scoring
         return None, 0.0, None
 
-  
+    best_vendor = sanitize_vendor_name(best_vendor)
+
     max_possible = 120 + 40 + 60 + 50 + 25   # up*120 + pos*40 + len + pos_bonus + top_bonus
     confidence = round(min(1.0, best_score / max_possible), 3)
 

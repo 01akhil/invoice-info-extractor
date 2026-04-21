@@ -1,1 +1,19 @@
-[]
+[
+  {
+    "job_id": "c6355df4-4ca0-4f7d-889d-42a4c6c7e30c",
+    "image_path": "E:\\emma\\emmaRobot\\images\\image1.jpg",
+    "status": "NEEDS_REVIEW",
+    "stage_failed": "ocr",
+    "reason": "ocr_no_text_regions",
+    "last_error": "ocr_no_text_regions",
+    "retry_count": 0,
+    "max_retries": 2,
+    "failure_class": "ocr",
+    "attempt_strategy": null,
+    "ocr_snapshot": [],
+    "extraction_payload": null,
+    "llm_last_raw": null,
+    "retry_history": [],
+    "recorded_at": "2026-04-21T07:49:24.548603+00:00"
+  }
+]
